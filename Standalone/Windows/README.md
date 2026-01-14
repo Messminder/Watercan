@@ -1,5 +1,7 @@
 # Watercan
 
+This read me is A.I. generated and will be replaced by a read me with more personality.
+
 **Sky: Children of the Light Spirit Tree Viewer and Editor**
 
 Watercan is a cross-platform desktop application for viewing and editing spirit trees from Sky: Children of the Light. It reads JSON data files containing spirit tree information and visualizes them as interactive dependency trees that closely mimic in-game spirit tree designs that were used since Sky version 0.4.X until 0.31.X.
@@ -86,10 +88,8 @@ cmake --build . --config Release
 ./Watercan
 
 # Windows
-# Note: Windows packaging guidance has been removed from the docs while we work on a single-exe plan.
+# Windows packaging is being redesigned to produce a single, standalone .exe. See `DOCS_WINDOWS_BUILD.md` for status.
 ```
-
-> Note: Sample JSON data files (for example `seasonal_spiritshop.json`) are runtime assets and are **not** required to configure or build the project. The application will open JSON files at runtime via **File → Open** or by placing them alongside the executable.
 
 ## Usage
 
