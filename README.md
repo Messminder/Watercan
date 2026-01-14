@@ -3,8 +3,7 @@
 To water and grow **spirit trees!**
 
 Watercan is a dependency tree viewer and editor specialized for Sky: COTL.
-It is currently intended for private server software developers, but anyone can use it to create their own spirit trees 
-that are compatible with ThatModdingCommunity and NightSky Communal Ark private server softwares.
+It is currently intended for private server software developers, but anyone can use it to create their own spirit trees that are compatible with ThatModdingCommunity and NightSky Communal Ark private server softwares.
 
 Currently, this software is not on point for release, but you're welcome to download it's earlybird on each of it's repo branch in the Standalone folder.
 
