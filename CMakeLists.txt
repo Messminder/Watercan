@@ -23,6 +23,30 @@ else()
     set(PLATFORM_LINUX TRUE)
 endif()
 
+# Packaging: create a standalone Windows folder with the built exe and runtime assets
+if(WIN32)
+    # Create a packaging target that only copies files that exist to avoid failures
+    add_custom_target(package_windows DEPENDS Watercan COMMENT "Packaging Standalone Windows bundle into Standalone/Windows")
+
+    add_custom_command(TARGET package_windows POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/Standalone/Windows"
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:Watercan> "${CMAKE_SOURCE_DIR}/Standalone/Windows/Watercan.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/res" "${CMAKE_SOURCE_DIR}/Standalone/Windows/res"
+    )
+
+    if(EXISTS "${CMAKE_SOURCE_DIR}/README.md")
+        add_custom_command(TARGET package_windows POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/README.md" "${CMAKE_SOURCE_DIR}/Standalone/Windows/README.md"
+        )
+    endif()
+
+    if(EXISTS "${CMAKE_SOURCE_DIR}/LICENSE")
+        add_custom_command(TARGET package_windows POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/LICENSE" "${CMAKE_SOURCE_DIR}/Standalone/Windows/LICENSE"
+        )
+    endif()
+endif()
+
 # Fetch dependencies
 include(FetchContent)
 
@@ -95,6 +119,13 @@ add_executable(Watercan
     src/app_type_colors.cpp
 )
 
+# Add WinMain wrapper on Windows to suppress console in Release
+if(WIN32)
+    target_sources(Watercan PRIVATE src/winmain_wrapper.cpp)
+    # Use WIN32 subsystem only for Release
+    set_property(TARGET Watercan PROPERTY WIN32_EXECUTABLE $<$<CONFIG:Release>:TRUE>)
+endif()
+
 target_include_directories(Watercan PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${imgui_SOURCE_DIR}
@@ -122,10 +153,9 @@ endif()
 # Platform-specific settings
 if(PLATFORM_WINDOWS)
     target_compile_definitions(Watercan PRIVATE PLATFORM_WINDOWS)
-    # Hide console window on Windows for release builds
-    if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        set_target_properties(Watercan PROPERTIES WIN32_EXECUTABLE TRUE)
-    endif()
+    # Keep console subsystem to use standard main() entrypoint on Windows.
+    # If you want a GUI-only executable (no console), change this to set
+    # WIN32_EXECUTABLE for the appropriate configuration and provide WinMain.
 elseif(PLATFORM_MACOS)
     target_compile_definitions(Watercan PRIVATE PLATFORM_MACOS)
     target_link_libraries(Watercan PRIVATE "-framework Cocoa" "-framework IOKit")

@@ -22,8 +22,16 @@
 #include <algorithm>
 #include <string>
 #include <limits>
+// On Windows, avoid min/max macros and provide POSIX-like helpers
 #ifdef _WIN32
+// Prevent Windows headers from defining macros named min/max which break std::min/std::max
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
+#include <string.h>
+// Provide a compatibility wrapper for POSIX strcasecmp used in sorting lambdas below
+static inline int strcasecmp(const char* a, const char* b) { return _stricmp(a, b); }
 #endif
 
 namespace Watercan {
