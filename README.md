@@ -1,103 +1,41 @@
-# Watercan
+# Watercan!
+---------
+To water and grow **spirit trees!**
 
-**Sky: Children of the Light Spirit Tree Viewer and Editor**
+Watercan is a dependency tree viewer and editor specialized for Sky: COTL.
+It is currently intended for private server software developers, but anyone can use it to create their own spirit trees 
+that are compatible with ThatModdingCommunity and NightSky Communal Ark private server softwares.
 
-Watercan is a cross-platform desktop application for viewing and editing spirit trees from Sky: Children of the Light. It reads JSON data files containing spirit tree information and visualizes them as interactive dependency trees that closely mimic in-game spirit tree designs that were used since Sky version 0.4.X until 0.31.X.
+Currently, this software is not on point for release, but you're welcome to download it's earlybird on each of it's repo branch in the Standalone folder.
 
-## Features
 
-- **Spirit List**: Browse all spirits from the loaded JSON file, with search filtering
-- **Tree Visualization**: View spirit trees with proper dependency layout
-- **Interactive Viewport**: Pan (right-click drag) and zoom (scroll wheel) the tree view. It even has collision detection!
-- **Node Information**: See node types, costs, and Adventure Pass status at a glance and edit them quickly and conveniently.
-- **Cross-Platform**: Works on Windows, macOS, and Linux
+## Nice features:
+* Interactive dependency tree viewer and editor. Allowing the user to add, delete, link and unlink nodes (broken, see under):
+  * Have your own color codes and save user preferences.
+  * Nodes even has physics because F U N.
+* Easy to use and understandable Node attribute editor:
+  * Use the scrollwheel on the Cost (cst) to quickly select numbers.
+* There is a raw JSON editor right under if you like:
+  * With colorful text when you do the indicated keyboard shortcuts.
+* Fully custom solution for browsing files in your computer.
+* Real-time reflection of edits everywhere.
+* Saves the whole file, or isolate a singular spirit in a singular JSON file.
+* Automatic Travelling Spirit identification.
+  * This is based on several checks. 
 
-## Node Types & Colors
+## What's currently lacking:
+* Watercan should be able to process names + ID = this icon! So displayed spirit trees would closely mimick what is reflected ingame.
+* Linking and unlinking nodes is broken.
 
-- **Blue (O)**: Outfit items
-- **Purple (E)**: Emote/Spirit upgrades  
-- **Gold (M)**: Music sheets
-- **Red (L)**: Lootbox items/Spells
-- **Golden border**: Root nodes
-- **Gold star indicator**: Adventure Pass items
+## Current issues:
+### Tree editor
+> When unlinking nodes, the cardinal rules seems extremely stubborn. Breaking the tree appart as it conflicts with the fact nodes can be in a "freeFloating state". You can always do File > Reload.
+> Watercan cannot process the item and ids with it's in-game icon, but this feature is greatly desired.
+> 
 
-## Building
 
-### Prerequisites
 
-- CMake 3.16 or higher
-- C++17 compatible compiler
-- OpenGL development libraries
 
-**Linux (Ubuntu/Debian):**
-```bash
-sudo apt update
-sudo apt install build-essential cmake libgl1-mesa-dev libgtk-3-dev
-```
-
-**Linux (Fedora):**
-```bash
-sudo dnf install cmake gcc-c++ mesa-libGL-devel gtk3-devel
-```
-
-**Linux (Arch Linux):**
-```bash
-# Update packages and install development tools and OpenGL/GTK dependencies
-sudo pacman -Syu --needed base-devel cmake pkgconf glfw gtk3 mesa
-```
-
-> Tip: On Arch the package `glfw` provides the GLFW development files; `mesa` provides the OpenGL drivers. If you use Wayland/other toolkits you may need additional packages (e.g., `libx11`, `libxrandr`).
-
-**macOS:**
-```bash
-xcode-select --install
-brew install cmake
-```
-
-**Windows:**
-- Install Visual Studio 2019 or later with C++ workload
-- Install CMake (https://cmake.org/download/)
-
-### Build Steps
-
-1. Clone or download the repository
-
-2. Create build directory and configure:
-```bash
-cd Watercan
-mkdir build
-cd build
-cmake ..
-```
-
-3. Build:
-```bash
-# Linux/macOS
-cmake --build . --config Release
-
-# Windows (Visual Studio)
-cmake --build . --config Release
-# Or open the generated .sln file in Visual Studio
-```
-
-4. Run:
-```bash
-# Linux/macOS
-./Watercan
-
-# Windows
-# Windows packaging is being redesigned to produce a single, standalone .exe. See `DOCS_WINDOWS_BUILD.md` for status.
-```
-
-## Usage
-
-1. Launch Watercan
-2. Go to **File > Open** or press `Ctrl+O`
-3. Select a spirit shop JSON file (e.g., `seasonal_spiritshop.json`)
-4. Browse spirits in the left panel
-5. Click a spirit to view its tree
-6. Use scroll wheel to zoom, right-click drag to pan
-7. Press `R` or click "Reset View" to reset the viewport
 
 ## JSON Format
 
@@ -147,6 +85,9 @@ Watercan expects JSON files with the following structure:
 | Pan | Right-click + drag |
 | Reset view | Press `R` or click "Reset View" |
 | Open file | `Ctrl+O` |
+| Cut | `CTRL+X` |
+| Copy | `CTRL-C`|
+| Paste | `CTRL+V` |
 
 ## License
 
