@@ -1,0 +1,142 @@
+#pragma once
+
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <cstdint>
+
+namespace Watercan {
+
+// Represents a single node in a spirit tree
+struct SpiritNode {
+    uint64_t id = 0;
+    uint64_t dep = 0;  // Parent dependency (0 = root node)
+    std::string name;
+    std::string spirit;
+    std::string type;
+    std::string costType;
+    int cost = 0;
+    bool isAdventurePass = false;
+    
+    // Computed layout information
+    float x = 0.0f;
+    float y = 0.0f;
+    std::vector<uint64_t> children;  // IDs of dependent nodes
+};
+
+// Represents a complete spirit tree
+struct SpiritTree {
+    std::string spiritName;
+    std::vector<SpiritNode> nodes;
+    uint64_t rootNodeId = 0;
+    
+    // Computed bounds for rendering
+    float minX = 0.0f, maxX = 0.0f;
+    float minY = 0.0f, maxY = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+
+// FNV-1a 32-bit hash function (matches Python fnv1a32)
+inline uint32_t fnv1a32(const std::string& data) {
+    constexpr uint32_t FNV_OFFSET_BASIS = 0x811C9DC5;
+    constexpr uint32_t FNV_PRIME = 0x01000193;
+    uint32_t h = FNV_OFFSET_BASIS;
+    for (char c : data) {
+        h = (h ^ static_cast<uint8_t>(c)) * FNV_PRIME;
+    }
+    return h;
+}
+
+// Manager class for loading and organizing spirit trees
+class SpiritTreeManager {
+public:
+    SpiritTreeManager() = default;
+    
+    // Load spirits from a JSON file
+    bool loadFromFile(const std::string& filepath);
+
+    // Load spirits from an in-memory JSON string (useful for embedded assets)
+    bool loadFromString(const std::string& jsonContents);
+    
+    // Save spirits to a JSON file (preserving original structure)
+    bool saveToFile(const std::string& filepath) const;
+    
+    // Update a node's ID based on its name (FNV-1a hash)
+    bool updateNodeId(const std::string& spiritName, uint64_t oldId);
+    
+    // Get list of all spirit names
+    const std::vector<std::string>& getSpiritNames() const { return m_spiritNames; }
+    
+    // Get list of guide spirit names
+    const std::vector<std::string>& getGuideNames() const { return m_guideNames; }
+    
+    // Get a specific spirit tree
+    SpiritTree* getTree(const std::string& spiritName);
+    const SpiritTree* getTree(const std::string& spiritName) const;
+    
+    // Get node count for a spirit
+    size_t getNodeCount(const std::string& spiritName) const;
+    
+    // Get a mutable node by ID
+    SpiritNode* getNode(const std::string& spiritName, uint64_t nodeId);
+    
+    // Update a node from JSON string, returns true if successful
+    // If newNodeId is provided, it will be set to the new ID (in case ID was changed)
+    bool updateNodeFromJson(const std::string& spiritName, uint64_t nodeId, const std::string& jsonStr, uint64_t* newNodeId = nullptr);
+    
+    // Create a new node at the given position, returns the new node's ID
+    uint64_t createNode(const std::string& spiritName, float x, float y);
+    
+    // Delete a node by ID, returns true if successful
+    bool deleteNode(const std::string& spiritName, uint64_t nodeId);
+    
+    // Rebuild tree relationships (call after editing nodes)
+    void rebuildTree(const std::string& spiritName);
+    
+    // Position a node as a child of its parent according to tree layout rules
+    void positionLinkedNode(const std::string& spiritName, uint64_t nodeId);
+    
+    // Convert a node to JSON string
+    static std::string nodeToJson(const SpiritNode& node);
+    
+    // Check if a spirit is a guide (has nodes with "questap" prefix or "tgc" in name)
+    bool isGuide(const std::string& spiritName) const;
+
+    // Heuristic: Check if a spirit is a travelling spirit (Sky notion)
+    // Rules (applies only to non-guides):
+    // 1) If any node has isAdventurePass==true, it's NOT a travelling spirit
+    // 2) It MUST contain at least one node whose name contains "emote_upgrade"
+    // 3) Otherwise, if there exists a node with typ != "seasonal heart" AND that node is not a root/top node (dep != 0),
+    //    then it's considered a travelling spirit.
+    bool isTravellingSpirit(const std::string& spiritName) const;
+
+    // Add a new empty spirit; if beforeSpirit is non-empty, insert before that spirit in file order
+    bool addSpirit(const std::string& spiritName, const std::string& beforeSpirit = "");
+
+    // Delete a spirit entirely
+    bool deleteSpirit(const std::string& spiritName);
+
+    // Move a node from one spirit to another (preserve node ID)
+    bool moveNode(const std::string& fromSpirit, const std::string& toSpirit, uint64_t nodeId);
+    
+    // Check if data is loaded
+    bool isLoaded() const { return !m_trees.empty(); }
+    
+    // Get loaded file path
+    const std::string& getLoadedFile() const { return m_loadedFile; }
+    
+private:
+    void buildTree(SpiritTree& tree);
+    void computeLayout(SpiritTree& tree);
+    void layoutSubtree(SpiritTree& tree, SpiritNode& node, float x, float y, int depth);
+    bool checkIfGuide(const SpiritTree& tree) const;
+    
+    std::unordered_map<std::string, SpiritTree> m_trees;
+    std::vector<std::string> m_spiritNames;  // Regular spirits (in file order)
+    std::vector<std::string> m_guideNames;   // Guide spirits (in file order)
+    std::vector<std::string> m_allSpiritNamesOrdered;  // All spirits in original file order
+    std::string m_loadedFile;
+};
+
+} // namespace Watercan
