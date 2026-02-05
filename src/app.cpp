@@ -1951,12 +1951,12 @@ void App::renderTreeViewport() {
     
     ImVec2 clickPos;
     clickPos.x = std::numeric_limits<float>::quiet_NaN(); // sentinel: set by renderer when canvas click occurs
-    uint64_t linkTargetId = 0;
-    uint64_t rightClickedNodeId = 0;
+    uint64_t linkTargetId = TreeRenderer::NO_NODE_ID;
+    uint64_t rightClickedNodeId = TreeRenderer::NO_NODE_ID;
     // Optional drag release outputs (single-node) and continuous tree-drag outputs
-    uint64_t dragReleasedId = 0;
+    uint64_t dragReleasedId = TreeRenderer::NO_NODE_ID;
     ImVec2 dragFinalOffset = ImVec2(0.0f, 0.0f);
-    uint64_t draggingTreeId = 0;
+    uint64_t draggingTreeId = TreeRenderer::NO_NODE_ID;
     ImVec2 dragTreeDelta = ImVec2(0.0f, 0.0f);
     // Pass the user's type colors to the main renderer so changes apply immediately
     bool clicked = m_treeRenderer.render(tree, m_createMode, &clickPos, 
@@ -1965,7 +1965,7 @@ void App::renderTreeViewport() {
                                           &dragReleasedId, &dragFinalOffset, &draggingTreeId, &dragTreeDelta);
 
     // If a drag just finished, persist the node's base offset so it remains at the dropped location
-    if (dragReleasedId != 0 && !m_selectedSpirit.empty()) {
+    if (dragReleasedId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
         if (m_treeManager.moveNodeBase(m_selectedSpirit, dragReleasedId, dragFinalOffset.x, dragFinalOffset.y)) {
             // Tell renderer to clear its transient offset now that the model has been updated
             m_treeRenderer.clearNodeOffset(dragReleasedId);
@@ -1974,7 +1974,7 @@ void App::renderTreeViewport() {
 
     // Continuous tree-drag: move only the dragged node; recompute local layout and
     // collect per-node shifts so the rest of the tree smoothly animates into place.
-    if (draggingTreeId != 0 && !m_selectedSpirit.empty()) {
+    if (draggingTreeId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
         // Move the entire tree so the dragged node remains under the cursor, then apply
         // scaled base shifts per node using graph distance so nodes near the dragged
         // node follow more closely and distant nodes lag (produces a smooth deformation).
@@ -2025,7 +2025,7 @@ void App::renderTreeViewport() {
     }
 
     // If the canvas was clicked (clickPos set) and we have a node in clipboard, open canvas paste popup
-    if (!std::isnan(clickPos.x) && m_hasClipboardNode && rightClickedNodeId == 0) {
+    if (!std::isnan(clickPos.x) && m_hasClipboardNode && rightClickedNodeId == TreeRenderer::NO_NODE_ID) {
         m_canvasPasteX = clickPos.x;
         m_canvasPasteY = clickPos.y;
         ImGui::OpenPopup("CanvasPastePopup");
@@ -2033,13 +2033,13 @@ void App::renderTreeViewport() {
     
 
     // Handle right-click context menu
-    if (rightClickedNodeId != 0) {
+    if (rightClickedNodeId != TreeRenderer::NO_NODE_ID) {
         m_contextMenuNodeId = rightClickedNodeId;
         m_showNodeContextMenu = true;
         ImGui::OpenPopup("NodeContextMenu");
     } else if (!std::isnan(clickPos.x) && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-        // Right-click on empty canvas should also open the context menu (with node id 0)
-        m_contextMenuNodeId = 0;
+        // Right-click on empty canvas should also open the context menu; represent canvas with NO_NODE_ID
+        m_contextMenuNodeId = TreeRenderer::NO_NODE_ID;
         m_showNodeContextMenu = true;
         ImGui::OpenPopup("NodeContextMenu");
     }
@@ -2191,7 +2191,7 @@ void App::renderTreeViewport() {
     }
     
     // Handle link mode - link source node to target (target becomes parent)
-    if (m_linkMode && clicked && linkTargetId != 0 && !m_selectedSpirit.empty()) {
+    if (m_linkMode && clicked && linkTargetId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
         SpiritNode* sourceNode = m_treeManager.getNode(m_selectedSpirit, m_linkSourceNodeId);
         if (sourceNode && linkTargetId != m_linkSourceNodeId) {
             // Set the source node's dep to the target node's ID
@@ -2216,7 +2216,7 @@ void App::renderTreeViewport() {
         
         // Exit link mode
         m_linkMode = false;
-        m_linkSourceNodeId = 0;
+        m_linkSourceNodeId = TreeRenderer::NO_NODE_ID;
     }
 }
 
@@ -2233,7 +2233,7 @@ void App::renderNodeDetails() {
     bool showFixButton = false;
     uint32_t expectedId = 0;
     
-    if (selectedNodeId != 0 && !m_selectedSpirit.empty()) {
+    if (selectedNodeId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
         const SpiritTree* tree = m_treeManager.getTree(m_selectedSpirit);
         if (tree) {
             for (const auto& node : tree->nodes) {
@@ -2251,7 +2251,7 @@ void App::renderNodeDetails() {
     // ImGui item IDs when multiple buttons with the same label appear in the same window.
     ImGui::Separator();
     
-    if (selectedNodeId == 0) {
+    if (selectedNodeId == TreeRenderer::NO_NODE_ID) {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No node selected");
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Left-click a node to");
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "view its details");

@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <array>
 #include <string>
+#include <limits>
 
 namespace Watercan {
 
@@ -47,15 +48,18 @@ public:
     float getZoom() const { return m_zoom; }
     void setPan(const ImVec2& pan) { m_pan = pan; }
     
+    // Special sentinel used to indicate 'no node' (distinct from a real node id which can be 0)
+    static constexpr uint64_t NO_NODE_ID = std::numeric_limits<uint64_t>::max();
+
     // Selection (supports multi-select via SHIFT)
     uint64_t getSelectedNodeId() const { return m_selectedNodeId; } // primary selected node
-    void setSelectedNodeId(uint64_t id) { m_selectedNodeId = id; m_selectedNodes.clear(); if (id != 0) m_selectedNodes.insert(id); }
-    void clearSelection() { m_selectedNodeId = 0; m_selectedNodes.clear(); }
+    void setSelectedNodeId(uint64_t id) { m_selectedNodeId = id; m_selectedNodes.clear(); if (id != NO_NODE_ID) m_selectedNodes.insert(id); }
+    void clearSelection() { m_selectedNodeId = NO_NODE_ID; m_selectedNodes.clear(); }
 
     const std::unordered_set<uint64_t>& getSelectedNodeIds() const { return m_selectedNodes; }
     bool isNodeSelected(uint64_t id) const { return m_selectedNodes.count(id) > 0; }
-    void addNodeToSelection(uint64_t id) { if (id != 0) { m_selectedNodes.insert(id); m_selectedNodeId = id; } }
-    void removeNodeFromSelection(uint64_t id) { bool wasPrimary = (m_selectedNodeId == id); m_selectedNodes.erase(id); if (m_selectedNodes.empty()) m_selectedNodeId = 0; else if (wasPrimary) m_selectedNodeId = *m_selectedNodes.begin(); }
+    void addNodeToSelection(uint64_t id) { if (id != NO_NODE_ID) { m_selectedNodes.insert(id); m_selectedNodeId = id; } }
+    void removeNodeFromSelection(uint64_t id) { bool wasPrimary = (m_selectedNodeId == id); m_selectedNodes.erase(id); if (m_selectedNodes.empty()) m_selectedNodeId = NO_NODE_ID; else if (wasPrimary) m_selectedNodeId = *m_selectedNodes.begin(); }
     
     // Reset all node offsets (return to computed positions)
     void resetNodeOffsets() { m_nodeOffsets.clear(); m_nodeVelocities.clear(); }
@@ -83,9 +87,8 @@ private:
     ImU32 getNodeColor(const SpiritNode& node) const;
     ImU32 getNodeBorderColor(const SpiritNode& node) const;
     
-    // Check if mouse is over a node, returns node ID or 0
-    uint64_t getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom);
-    
+    // Check if mouse is over a node, returns node ID or NO_NODE_ID when none
+    uint64_t getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom);    
     // Get node offset from original position
     ImVec2 getNodeOffset(uint64_t nodeId) const;
     
@@ -96,11 +99,11 @@ private:
     ImVec2 m_lastMousePos = {0.0f, 0.0f};
     
     // Selection state
-    uint64_t m_selectedNodeId = 0;
+    uint64_t m_selectedNodeId = NO_NODE_ID;
     std::unordered_set<uint64_t> m_selectedNodes; // Multi-selection set (contains selected node ids)
     
     // Node dragging state
-    uint64_t m_draggedNodeId = 0;
+    uint64_t m_draggedNodeId = NO_NODE_ID;
     bool m_isDraggingNode = false;
     // Tree dragging state (dragging a non-free-floating node moves the entire tree via pan)
     bool m_isDraggingTree = false;

@@ -121,11 +121,11 @@ private:
     
     // Link mode state
     bool m_linkMode = false;
-    uint64_t m_linkSourceNodeId = 0;  // The node being linked (will become child)
+    uint64_t m_linkSourceNodeId = TreeRenderer::NO_NODE_ID;  // The node being linked (will become child)
     
     // Delete confirmation state
     bool m_deleteConfirmMode = false;
-    uint64_t m_deleteNodeId = 0;
+    uint64_t m_deleteNodeId = TreeRenderer::NO_NODE_ID;
 
     // New / delete spirit UI
     bool m_showNewSpiritModal = false;
@@ -149,7 +149,7 @@ private:
     
     // Context menu state
     bool m_showNodeContextMenu = false;
-    uint64_t m_contextMenuNodeId = 0;
+    uint64_t m_contextMenuNodeId = TreeRenderer::NO_NODE_ID;
 
     // Tools -> FNV1a32 Generator dialog
     bool m_showFNVDialog = false;

@@ -205,10 +205,10 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
     m_currentRenderTypeColors = typeColors;
     // Remember whether this render is a read-only preview (affects label rendering, interactivity)
     m_currentRenderIsPreview = readOnlyPreview;
-    // Prepare optional drag output placeholders
-    if (outDragReleasedNodeId) *outDragReleasedNodeId = 0;
+    // Prepare optional drag output placeholders (use NO_NODE_ID sentinel)
+    if (outDragReleasedNodeId) *outDragReleasedNodeId = NO_NODE_ID;
     if (outDragFinalOffset) { outDragFinalOffset->x = 0.0f; outDragFinalOffset->y = 0.0f; }
-    if (outDraggingTreeNodeId) *outDraggingTreeNodeId = 0;
+    if (outDraggingTreeNodeId) *outDraggingTreeNodeId = NO_NODE_ID;
     if (outDragTreeDelta) { outDragTreeDelta->x = 0.0f; outDragTreeDelta->y = 0.0f; }
     
     if (!tree || tree->nodes.empty()) {
@@ -278,7 +278,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             ImVec2 mousePos = io.MousePos;
             uint64_t rightClickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
-            if (rightClickedNode != 0 && outRightClickedNodeId) {
+            if (rightClickedNode != NO_NODE_ID && outRightClickedNodeId) {
                 *outRightClickedNodeId = rightClickedNode;
                 // Select behavior: respect SHIFT to multi-select
                 bool shift = io.KeyShift;
@@ -320,7 +320,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImVec2 mousePos = io.MousePos;
                 uint64_t clickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
-                if (clickedNode != 0 && outLinkTargetId) {
+                if (clickedNode != NO_NODE_ID && outLinkTargetId) {
                     *outLinkTargetId = clickedNode;
                     actionOccurred = true;
                 }
@@ -336,7 +336,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImVec2 mousePos = io.MousePos;
                 uint64_t clickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
-                if (clickedNode != 0) {
+                if (clickedNode != NO_NODE_ID) {
                     // Check for multi-select (SHIFT held)
                     ImGuiIO& io = ImGui::GetIO();
                     bool shift = io.KeyShift;
@@ -402,7 +402,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             }
             
             // Handle node/tree dragging
-            if ((m_isDraggingNode || m_isDraggingTree) && m_draggedNodeId != 0) {
+            if ((m_isDraggingNode || m_isDraggingTree) && m_draggedNodeId != NO_NODE_ID) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     if (m_isDraggingTree) {
                         // Tree drag: compute desired base position for the dragged node and report the
@@ -458,7 +458,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                     // Mouse released - handle release for both modes
                     if (m_isDraggingNode) {
                         // Node drag ended: report final offset
-                        if (m_draggedNodeId != 0) {
+                        if (m_draggedNodeId != NO_NODE_ID) {
                             ImVec2 finalOffset = m_nodeOffsets[m_draggedNodeId];
                             if (outDragReleasedNodeId) *outDragReleasedNodeId = m_draggedNodeId;
                             if (outDragFinalOffset) { outDragFinalOffset->x = finalOffset.x; outDragFinalOffset->y = finalOffset.y; }
@@ -470,7 +470,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                     // End dragging state
                     m_isDraggingNode = false;
                     m_isDraggingTree = false;
-                    m_draggedNodeId = 0;
+                    m_draggedNodeId = NO_NODE_ID;
                 }
             }
             
@@ -494,14 +494,14 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
         // Mouse left the canvas while dragging - release the node
         if (m_isDraggingNode && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             // Mouse left canvas while dragging - commit final offset
-            if (m_draggedNodeId != 0) {
+            if (m_draggedNodeId != NO_NODE_ID) {
                 ImVec2 finalOffset = m_nodeOffsets[m_draggedNodeId];
                 if (outDragReleasedNodeId) *outDragReleasedNodeId = m_draggedNodeId;
                 if (outDragFinalOffset) { outDragFinalOffset->x = finalOffset.x; outDragFinalOffset->y = finalOffset.y; }
                 // Do NOT erase offsets here; caller will commit base and then tell renderer to clear.
             }
             m_isDraggingNode = false;
-            m_draggedNodeId = 0;
+            m_draggedNodeId = NO_NODE_ID;
         }
     }
     
@@ -972,7 +972,7 @@ ImU32 TreeRenderer::getNodeBorderColor(const SpiritNode& node) const {
 void TreeRenderer::resetView() {
     m_zoom = 1.0f;
     m_pan = {0.0f, 0.0f};
-    m_selectedNodeId = 0;
+    m_selectedNodeId = NO_NODE_ID;
 }
 
 uint64_t TreeRenderer::getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom) {
@@ -999,7 +999,7 @@ uint64_t TreeRenderer::getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos
         }
     }
     
-    return 0;
+    return NO_NODE_ID;
 }
 
 } // namespace Watercan
