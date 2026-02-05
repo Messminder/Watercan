@@ -144,7 +144,6 @@ public:
     // This is intended for continuous tree dragging where the entire tree should
     // move with the cursor while preserving relative layout.
     bool moveTreeBase(const std::string& spiritName, float dx, float dy);
-    
     // Check if data is loaded
     bool isLoaded() const { return !m_trees.empty(); }
     
@@ -162,6 +161,7 @@ private:
     std::vector<std::string> m_guideNames;   // Guide spirits (in file order)
     std::vector<std::string> m_allSpiritNamesOrdered;  // All spirits in original file order
     std::string m_loadedFile;
+
 };
 
 } // namespace Watercan

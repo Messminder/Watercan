@@ -613,6 +613,14 @@ bool SpiritTreeManager::moveTreeBase(const std::string& spiritName, float dx, fl
     return true;
 }
 
+
+
+
+
+
+
+
+
 void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64_t nodeId,
                                              std::unordered_map<uint64_t, std::pair<float,float>>* outShifts) {
     auto it = m_trees.find(spiritName);

@@ -1879,7 +1879,7 @@ void App::renderTreeViewport() {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
             if (ImGui::Button("Yes, Krill it.", ImVec2(yesW, 0))) {
-                // Actually delete the node
+                // Actually krill the node
                 m_treeManager.deleteNode(m_selectedSpirit, m_deleteNodeId);
                 m_treeRenderer.clearFreeFloating(m_deleteNodeId);
                 // Remove from selection set if present
@@ -2456,6 +2456,7 @@ void App::renderNodeDetails() {
             }
             attrChanged = true;
             m_lastEditedNodeId = newId;
+
         }
     }
 
