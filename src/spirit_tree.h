@@ -64,6 +64,8 @@ public:
     
     // Update a node's ID based on its name (FNV-1a hash)
     bool updateNodeId(const std::string& spiritName, uint64_t oldId);
+    // Change a node id from oldId to newId, updating any references (deps/children/root)
+    bool changeNodeId(const std::string& spiritName, uint64_t oldId, uint64_t newId);
     
     // Get list of all spirit names
     const std::vector<std::string>& getSpiritNames() const { return m_spiritNames; }
@@ -95,15 +97,30 @@ public:
     void rebuildTree(const std::string& spiritName);
     
     // Position a node as a child of its parent according to tree layout rules
-    void positionLinkedNode(const std::string& spiritName, uint64_t nodeId);
+    // Optionally, provide an output map of nodeId -> (dx, dy) shifts representing the
+    // visual offset that should be applied to keep the node visually steady and then animate
+    // into the new base position (oldBase - newBase).
+    void positionLinkedNode(const std::string& spiritName, uint64_t nodeId,
+                            std::unordered_map<uint64_t, std::pair<float,float>>* outShifts = nullptr);
+    // Re-layout the subtree rooted at nodeId and return per-node shifts (oldBase - newBase)
+    // for nodes in that subtree so callers can animate them smoothly. The root node's base
+    // position is assumed to already be set in the tree (e.g., via moveNodeBase) and will
+    // not be included in the shifts map (so it can be dragged directly without animation).
+    bool layoutSubtreeAndCollectShifts(const std::string& spiritName, uint64_t rootNodeId,
+                                       std::unordered_map<uint64_t, std::pair<float,float>>* outShifts = nullptr);
+
+
     
     // Convert a node to JSON string
     static std::string nodeToJson(const SpiritNode& node);
-    
+
+    // Try to find a node name in the originally loaded file for the given spirit and id.
+    // If the app loaded from a file, this will scan that file and return the original
+    // "nm" value if present. Returns true on success.
+    bool getNameFromLoadedFile(const std::string& spiritName, uint64_t nodeId, std::string* outName) const;
+
     // Check if a spirit is a guide (has nodes with "questap" prefix or "tgc" in name)
     bool isGuide(const std::string& spiritName) const;
-
-    // Heuristic: Check if a spirit is a travelling spirit (Sky notion)
     // Rules (applies only to non-guides):
     // 1) If any node has isAdventurePass==true, it's NOT a travelling spirit
     // 2) It MUST contain at least one node whose name contains "emote_upgrade"
@@ -119,6 +136,14 @@ public:
 
     // Move a node from one spirit to another (preserve node ID)
     bool moveNode(const std::string& fromSpirit, const std::string& toSpirit, uint64_t nodeId);
+
+    // Shift the stored base position of a node by (dx,dy). Used to persist a drag operation
+    // when the user releases the mouse so the node remains at the dropped location.
+    bool moveNodeBase(const std::string& spiritName, uint64_t nodeId, float dx, float dy);
+    // Shift the stored base position of ALL nodes in a spirit tree by (dx,dy).
+    // This is intended for continuous tree dragging where the entire tree should
+    // move with the cursor while preserving relative layout.
+    bool moveTreeBase(const std::string& spiritName, float dx, float dy);
     
     // Check if data is loaded
     bool isLoaded() const { return !m_trees.empty(); }

@@ -1,7 +1,9 @@
 #include "tree_renderer.h"
 #include <algorithm>
 #include <cmath>
+#include <queue>
 #include <unordered_map>
+#include <cstdio>
 
 namespace Watercan {
 
@@ -99,6 +101,10 @@ void TreeRenderer::updatePhysics(float deltaTime, const SpiritTree* tree) {
     
     // Apply spring physics to pull nodes back to their original positions
     std::vector<uint64_t> toRemove;
+
+    // NOTE: if position changes are done via applyBaseShift by the app
+    // (oldBase - newBase stored as offset), the spring physics above will
+    // bring offsets smoothly back towards zero making nodes animate.
     
     for (auto& [nodeId, offset] : m_nodeOffsets) {
         // Don't apply spring force to the node being dragged
@@ -156,6 +162,18 @@ void TreeRenderer::updatePhysics(float deltaTime, const SpiritTree* tree) {
     }
 }
 
+void TreeRenderer::applyBaseShift(uint64_t nodeId, float dx, float dy) {
+    // Apply an immediate offset equal to oldBase - newBase so the visual world
+    // position remains unchanged. The spring physics in updatePhysics will
+    // then pull the offset smoothly back to zero, animating the node into place.
+    m_nodeOffsets[nodeId].x += dx;
+    m_nodeOffsets[nodeId].y += dy;
+    // Kick the velocity toward the direction of the target (negative of offset)
+    // to give the motion some responsiveness.
+    m_nodeVelocities[nodeId].x += -dx * 8.0f;
+    m_nodeVelocities[nodeId].y += -dy * 8.0f;
+}
+
 ImVec2 TreeRenderer::getNodeOffset(uint64_t nodeId) const {
     auto it = m_nodeOffsets.find(nodeId);
     if (it != m_nodeOffsets.end()) {
@@ -164,17 +182,34 @@ ImVec2 TreeRenderer::getNodeOffset(uint64_t nodeId) const {
     return ImVec2(0.0f, 0.0f);
 }
 
+void TreeRenderer::clearNodeOffset(uint64_t nodeId) {
+    m_nodeOffsets.erase(nodeId);
+    m_nodeVelocities.erase(nodeId);
+    if (m_draggedNodeId == nodeId) {
+        m_dragGrabOffset = ImVec2(0.0f, 0.0f);
+    }
+}
+
 bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outClickPos,
                           bool linkMode, uint64_t* outLinkTargetId,
                           uint64_t* outRightClickedNodeId,
                           bool deleteConfirmMode,
                           bool readOnlyPreview,
-                          const std::unordered_map<std::string, std::array<float,4>>* typeColors) {
+                          const std::unordered_map<std::string, std::array<float,4>>* typeColors,
+                          uint64_t* outDragReleasedNodeId,
+                          ImVec2* outDragFinalOffset,
+                          uint64_t* outDraggingTreeNodeId,
+                          ImVec2* outDragTreeDelta) {
     bool actionOccurred = false;
     // Store the provided type color map for use by getNodeColor/getNodeBorderColor
     m_currentRenderTypeColors = typeColors;
     // Remember whether this render is a read-only preview (affects label rendering, interactivity)
     m_currentRenderIsPreview = readOnlyPreview;
+    // Prepare optional drag output placeholders
+    if (outDragReleasedNodeId) *outDragReleasedNodeId = 0;
+    if (outDragFinalOffset) { outDragFinalOffset->x = 0.0f; outDragFinalOffset->y = 0.0f; }
+    if (outDraggingTreeNodeId) *outDraggingTreeNodeId = 0;
+    if (outDragTreeDelta) { outDragTreeDelta->x = 0.0f; outDragTreeDelta->y = 0.0f; }
     
     if (!tree || tree->nodes.empty()) {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), 
@@ -245,7 +280,15 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             uint64_t rightClickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
             if (rightClickedNode != 0 && outRightClickedNodeId) {
                 *outRightClickedNodeId = rightClickedNode;
-                m_selectedNodeId = rightClickedNode;  // Also select the node
+                // Select behavior: respect SHIFT to multi-select
+                bool shift = io.KeyShift;
+                if (shift) {
+                    if (isNodeSelected(rightClickedNode)) removeNodeFromSelection(rightClickedNode);
+                    else addNodeToSelection(rightClickedNode);
+                } else {
+                    clearSelection();
+                    addNodeToSelection(rightClickedNode);
+                }
             } else {
                 // Right-clicked empty space: report click position in world coordinates so the app can show a context menu
                 float worldX = (mousePos.x - origin.x) / m_zoom;
@@ -294,43 +337,139 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                 ImVec2 mousePos = io.MousePos;
                 uint64_t clickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
                 if (clickedNode != 0) {
-                    // Select the node and start dragging
-                    m_selectedNodeId = clickedNode;
-                    m_draggedNodeId = clickedNode;
-                    m_isDraggingNode = true;
-                    
-                    // Reset velocity when starting to drag
-                    m_nodeVelocities[clickedNode] = ImVec2(0.0f, 0.0f);
-                } else {
-                    // Clicked on empty space - deselect
-                    m_selectedNodeId = 0;
+                    // Check for multi-select (SHIFT held)
+                    ImGuiIO& io = ImGui::GetIO();
+                    bool shift = io.KeyShift;
 
-                    // Convert screen position to world coordinates and report click position
-                    float worldX = (mousePos.x - origin.x) / m_zoom;
-                    float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
-                    if (outClickPos) {
-                        outClickPos->x = worldX;
-                        outClickPos->y = worldY;
+                    if (shift) {
+                        // Toggle selection membership
+                        if (isNodeSelected(clickedNode)) {
+                            removeNodeFromSelection(clickedNode);
+                        } else {
+                            addNodeToSelection(clickedNode);
+                        }
+                        // Update click position for external handlers
+                        float worldX = (mousePos.x - origin.x) / m_zoom;
+                        float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
+                        if (outClickPos) { outClickPos->x = worldX; outClickPos->y = worldY; }
+                    } else {
+                        // Single selection: clear others and select this node
+                        clearSelection();
+                        addNodeToSelection(clickedNode);
+
+                        // Determine drag mode: free-floating nodes drag individually; regular nodes drag the whole tree
+                        float worldX = (mousePos.x - origin.x) / m_zoom;
+                        float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
+                        if (isFreeFloating(clickedNode)) {
+                            m_draggedNodeId = clickedNode;
+                            m_isDraggingNode = true;
+
+                            // Reset velocity when starting to drag
+                            m_nodeVelocities[clickedNode] = ImVec2(0.0f, 0.0f);
+
+                            // Compute grab offset so the node sticks to the cursor
+                            ImVec2 currentOffset = getNodeOffset(clickedNode);
+                            // Find base position of clicked node
+                            const SpiritNode* baseNode = nullptr;
+                            for (const auto& n : tree->nodes) if (n.id == clickedNode) { baseNode = &n; break; }
+                            if (baseNode) {
+                                m_dragGrabOffset.x = (baseNode->x + currentOffset.x) - worldX;
+                                m_dragGrabOffset.y = (baseNode->y + currentOffset.y) - worldY;
+                            } else {
+                                m_dragGrabOffset = ImVec2(0.0f, 0.0f);
+                            }
+                            if (outClickPos) {
+                                outClickPos->x = worldX;
+                                outClickPos->y = worldY;
+                            }
+                        } else {
+                            // Start a tree drag: move the whole tree via pan so shape is preserved
+                            m_draggedNodeId = clickedNode;
+                            m_isDraggingTree = true;
+                            // Compute grab between node base and mouse world coords
+                            const SpiritNode* baseNode = nullptr;
+                            for (const auto& n : tree->nodes) if (n.id == clickedNode) { baseNode = &n; break; }
+                            if (baseNode) {
+                                m_dragTreeGrab.x = baseNode->x - worldX;
+                                m_dragTreeGrab.y = baseNode->y - worldY;
+                            } else {
+                                m_dragTreeGrab = ImVec2(0.0f, 0.0f);
+                            }
+                        }
                     }
                     actionOccurred = true;
                 }
             }
             
-            // Handle node dragging
-            if (m_isDraggingNode && m_draggedNodeId != 0) {
+            // Handle node/tree dragging
+            if ((m_isDraggingNode || m_isDraggingTree) && m_draggedNodeId != 0) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                    ImVec2 delta = io.MouseDelta;
-                    // Convert screen delta to world space (accounting for zoom and Y inversion)
-                    float worldDeltaX = delta.x / m_zoom;
-                    float worldDeltaY = -delta.y / m_zoom;  // Invert Y
-                    
-                    // Update the node's offset
-                    ImVec2& offset = m_nodeOffsets[m_draggedNodeId];
-                    offset.x += worldDeltaX;
-                    offset.y += worldDeltaY;
+                    if (m_isDraggingTree) {
+                        // Tree drag: compute desired base position for the dragged node and report the
+                        // delta to the caller so it can immediately shift the model (move all nodes).
+                        float worldX = (io.MousePos.x - origin.x) / m_zoom;
+                        float worldY = -(io.MousePos.y - origin.y) / m_zoom;  // Invert Y
+
+                        // desired base for the node
+                        float desiredX = worldX + m_dragTreeGrab.x;
+                        float desiredY = worldY + m_dragTreeGrab.y;
+
+                        // Find base position for the dragged node
+                        const SpiritNode* baseNode = nullptr;
+                        for (const auto& n : tree->nodes) if (n.id == m_draggedNodeId) { baseNode = &n; break; }
+                        if (baseNode) {
+                            float dx = desiredX - baseNode->x;
+                            float dy = desiredY - baseNode->y;
+
+                            // Report this per-frame delta to the app so it can call moveTreeBase
+                            if (outDraggingTreeNodeId) *outDraggingTreeNodeId = m_draggedNodeId;
+                            if (outDragTreeDelta) { outDragTreeDelta->x = dx; outDragTreeDelta->y = dy; }
+                        }
+                    } else {
+                        // Node drag (free-floating): stick node under cursor
+                        // Compute the current mouse world position
+                        float worldX = (io.MousePos.x - origin.x) / m_zoom;
+                        float worldY = -(io.MousePos.y - origin.y) / m_zoom;  // Invert Y
+
+                        // Find base position for the dragged node
+                        const SpiritNode* baseNode = nullptr;
+                        for (const auto& n : tree->nodes) if (n.id == m_draggedNodeId) { baseNode = &n; break; }
+
+                        if (baseNode) {
+                            // Maintain the grab offset so the node stays under the cursor
+                            ImVec2 desiredOffset;
+                            desiredOffset.x = worldX + m_dragGrabOffset.x - baseNode->x;
+                            desiredOffset.y = worldY + m_dragGrabOffset.y - baseNode->y;
+
+                            m_nodeOffsets[m_draggedNodeId] = desiredOffset;
+                            // Zero velocity to avoid spring inertia while dragging
+                            m_nodeVelocities[m_draggedNodeId] = ImVec2(0.0f, 0.0f);
+                        } else {
+                            // Fallback to delta-based behavior if the base node can't be found
+                            ImVec2 delta = io.MouseDelta;
+                            float worldDeltaX = delta.x / m_zoom;
+                            float worldDeltaY = -delta.y / m_zoom;  // Invert Y
+                            ImVec2& offset = m_nodeOffsets[m_draggedNodeId];
+                            offset.x += worldDeltaX;
+                            offset.y += worldDeltaY;
+                        }
+                    }
                 } else {
-                    // Mouse released - stop dragging, let spring take over
+                    // Mouse released - handle release for both modes
+                    if (m_isDraggingNode) {
+                        // Node drag ended: report final offset
+                        if (m_draggedNodeId != 0) {
+                            ImVec2 finalOffset = m_nodeOffsets[m_draggedNodeId];
+                            if (outDragReleasedNodeId) *outDragReleasedNodeId = m_draggedNodeId;
+                            if (outDragFinalOffset) { outDragFinalOffset->x = finalOffset.x; outDragFinalOffset->y = finalOffset.y; }
+                            // Do NOT erase offsets here; the app will call moveNodeBase and then
+                            // notify the renderer to clear the offset so there is no frame where
+                            // the visual position snaps back to the old base.
+                        }
+                    }
+                    // End dragging state
                     m_isDraggingNode = false;
+                    m_isDraggingTree = false;
                     m_draggedNodeId = 0;
                 }
             }
@@ -354,6 +493,13 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
     } else {
         // Mouse left the canvas while dragging - release the node
         if (m_isDraggingNode && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            // Mouse left canvas while dragging - commit final offset
+            if (m_draggedNodeId != 0) {
+                ImVec2 finalOffset = m_nodeOffsets[m_draggedNodeId];
+                if (outDragReleasedNodeId) *outDragReleasedNodeId = m_draggedNodeId;
+                if (outDragFinalOffset) { outDragFinalOffset->x = finalOffset.x; outDragFinalOffset->y = finalOffset.y; }
+                // Do NOT erase offsets here; caller will commit base and then tell renderer to clear.
+            }
             m_isDraggingNode = false;
             m_draggedNodeId = 0;
         }
@@ -381,7 +527,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
     
     // Draw nodes
     for (const auto& node : tree->nodes) {
-        bool isSelected = (node.id == m_selectedNodeId);
+        bool isSelected = isNodeSelected(node.id);
         drawNode(drawList, node, origin, m_zoom, isSelected);
     }
     
@@ -605,6 +751,19 @@ void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node,
         ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
         ImVec2 textPos(screenPos.x - textSize.x * 0.5f, screenPos.y - textSize.y * 0.5f);
         drawList->AddText(textPos, labelColor, label.c_str());
+
+        // When zoomed in enough, display the node's object id under the nm
+        // (show as 0xHEX for readability). Skip in preview mode.
+        // Show node's 'id' attribute when zoomed in more (higher threshold)
+        constexpr float ID_ZOOM_THRESHOLD = 1.8f; // show only when quite zoomed in
+        if (!m_currentRenderIsPreview && zoom >= ID_ZOOM_THRESHOLD) {
+            char idBuf[64];
+            // Display as decimal 'id: 12345' so it matches the node attribute users expect
+            std::snprintf(idBuf, sizeof(idBuf), "id: %llu", (unsigned long long)node.id);
+            ImVec2 idSize = ImGui::CalcTextSize(idBuf);
+            ImVec2 idPos(screenPos.x - idSize.x * 0.5f, textPos.y + textSize.y + 3.0f * zoom);
+            drawList->AddText(idPos, IM_COL32(200, 200, 210, 240), idBuf);
+        }
     }
     
     // Draw type indicator at south east of node

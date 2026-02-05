@@ -75,6 +75,7 @@ private:
     
     // JSON editor state
     uint64_t m_lastEditedNodeId = 0;
+    int m_lastEditedSelectionCount = 0;
     char m_jsonEditBuffer[8192] = "";
     bool m_jsonParseError = false;
     std::string m_jsonErrorMsg;
@@ -167,9 +168,15 @@ private:
     // Known typ values seen across loaded files (persisted in-memory during session)
     std::unordered_set<std::string> m_knownTypes;
 
+    // Track node IDs for which 'Fix name by ID' failed to find a name in the loaded file (spirit -> set of node ids)
+    std::unordered_map<std::string, std::unordered_set<uint64_t>> m_unknownNameFromLoadedFileIds;
+
     // Helpers to maintain known types
     void addKnownType(const std::string& t);
     void syncKnownTypesFromTrees();
+
+
+
 
     // Persist and load user-saved type colors
     bool saveTypeColorsToDisk();

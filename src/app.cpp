@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include "embedded_resources.h"
+#include <deque>
 
 #include <cstdio>
 #include <cstdlib>
@@ -1450,7 +1451,7 @@ void App::renderUI() {
                 float panY = centerY - (canvasSize.y * 0.25f / zoom);
                 previewRenderer.setPan(ImVec2(panX, panY));
                 // Render the mock preview — colors are still driven by m_typeColors if present
-                previewRenderer.render(&preview, false, nullptr, false, nullptr, nullptr, false, true, &m_typeColors);
+                previewRenderer.render(&preview, false, nullptr, false, nullptr, nullptr, false, true, &m_typeColors, nullptr, nullptr, nullptr, nullptr);
             }
         }
 
@@ -1881,8 +1882,9 @@ void App::renderTreeViewport() {
                 // Actually delete the node
                 m_treeManager.deleteNode(m_selectedSpirit, m_deleteNodeId);
                 m_treeRenderer.clearFreeFloating(m_deleteNodeId);
-                if (m_treeRenderer.getSelectedNodeId() == m_deleteNodeId) {
-                    m_treeRenderer.setSelectedNodeId(0);
+                // Remove from selection set if present
+                if (m_treeRenderer.isNodeSelected(m_deleteNodeId)) {
+                    m_treeRenderer.removeNodeFromSelection(m_deleteNodeId);
                 }
                 m_deleteConfirmMode = false;
                 m_deleteNodeId = 0;
@@ -1951,10 +1953,76 @@ void App::renderTreeViewport() {
     clickPos.x = std::numeric_limits<float>::quiet_NaN(); // sentinel: set by renderer when canvas click occurs
     uint64_t linkTargetId = 0;
     uint64_t rightClickedNodeId = 0;
+    // Optional drag release outputs (single-node) and continuous tree-drag outputs
+    uint64_t dragReleasedId = 0;
+    ImVec2 dragFinalOffset = ImVec2(0.0f, 0.0f);
+    uint64_t draggingTreeId = 0;
+    ImVec2 dragTreeDelta = ImVec2(0.0f, 0.0f);
     // Pass the user's type colors to the main renderer so changes apply immediately
     bool clicked = m_treeRenderer.render(tree, m_createMode, &clickPos, 
                                           m_linkMode, &linkTargetId, 
-                                          &rightClickedNodeId, m_deleteConfirmMode, false, &m_typeColors);
+                                          &rightClickedNodeId, m_deleteConfirmMode, false, &m_typeColors,
+                                          &dragReleasedId, &dragFinalOffset, &draggingTreeId, &dragTreeDelta);
+
+    // If a drag just finished, persist the node's base offset so it remains at the dropped location
+    if (dragReleasedId != 0 && !m_selectedSpirit.empty()) {
+        if (m_treeManager.moveNodeBase(m_selectedSpirit, dragReleasedId, dragFinalOffset.x, dragFinalOffset.y)) {
+            // Tell renderer to clear its transient offset now that the model has been updated
+            m_treeRenderer.clearNodeOffset(dragReleasedId);
+        }
+    }
+
+    // Continuous tree-drag: move only the dragged node; recompute local layout and
+    // collect per-node shifts so the rest of the tree smoothly animates into place.
+    if (draggingTreeId != 0 && !m_selectedSpirit.empty()) {
+        // Move the entire tree so the dragged node remains under the cursor, then apply
+        // scaled base shifts per node using graph distance so nodes near the dragged
+        // node follow more closely and distant nodes lag (produces a smooth deformation).
+        if (m_treeManager.moveTreeBase(m_selectedSpirit, dragTreeDelta.x, dragTreeDelta.y)) {
+            const SpiritTree* treePtr = m_treeManager.getTree(m_selectedSpirit);
+            if (treePtr) {
+                // Build id->node map and BFS to compute graph distances from dragged node
+                std::unordered_map<uint64_t, const SpiritNode*> idToNode;
+                for (const auto &n : treePtr->nodes) idToNode[n.id] = &n;
+
+                std::unordered_map<uint64_t, int> dist;
+                std::deque<uint64_t> q;
+                dist[draggingTreeId] = 0;
+                q.push_back(draggingTreeId);
+                while (!q.empty()) {
+                    uint64_t cur = q.front(); q.pop_front();
+                    auto it = idToNode.find(cur);
+                    if (it == idToNode.end()) continue;
+                    const SpiritNode* node = it->second;
+                    // neighbours: parent
+                    if (node->dep != 0 && dist.find(node->dep) == dist.end()) {
+                        dist[node->dep] = dist[cur] + 1;
+                        q.push_back(node->dep);
+                    }
+                    // children
+                    for (uint64_t c : node->children) {
+                        if (dist.find(c) == dist.end()) {
+                            dist[c] = dist[cur] + 1;
+                            q.push_back(c);
+                        }
+                    }
+                }
+
+                // Tunable: how many graph steps to fade the follow effect across
+                const float falloffDepth = 3.0f;
+                for (const auto &n : treePtr->nodes) {
+                    int d = 9999;
+                    auto itd = dist.find(n.id);
+                    if (itd != dist.end()) d = itd->second;
+                    float factor = std::min(1.0f, (float)d / falloffDepth); // 0 => full move, 1 => no immediate move
+                    float sx = -factor * dragTreeDelta.x;
+                    float sy = -factor * dragTreeDelta.y;
+                    // Apply per-node base-shift to animate towards the new layout
+                    m_treeRenderer.applyBaseShift(n.id, sx, sy);
+                }
+            }
+        }
+    }
 
     // If the canvas was clicked (clickPos set) and we have a node in clipboard, open canvas paste popup
     if (!std::isnan(clickPos.x) && m_hasClipboardNode && rightClickedNodeId == 0) {
@@ -1963,6 +2031,7 @@ void App::renderTreeViewport() {
         ImGui::OpenPopup("CanvasPastePopup");
     }
     
+
     // Handle right-click context menu
     if (rightClickedNodeId != 0) {
         m_contextMenuNodeId = rightClickedNodeId;
@@ -2134,8 +2203,15 @@ void App::renderTreeViewport() {
             // Rebuild tree to update relationships
             m_treeManager.rebuildTree(m_selectedSpirit);
             
-            // Position the linked node according to tree layout rules
-            m_treeManager.positionLinkedNode(m_selectedSpirit, m_linkSourceNodeId);
+            // Position the linked node according to tree layout rules and collect visual shifts
+            std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+            m_treeManager.positionLinkedNode(m_selectedSpirit, m_linkSourceNodeId, &shifts);
+            // Apply base-shift offsets so nodes animate smoothly into their new positions
+            for (const auto& kv : shifts) {
+                auto id = kv.first;
+                const auto& p = kv.second;
+                m_treeRenderer.applyBaseShift(id, p.first, p.second);
+            }
         }
         
         // Exit link mode
@@ -2144,6 +2220,8 @@ void App::renderTreeViewport() {
     }
 }
 
+
+
 void App::renderNodeDetails() {
     // Add padding
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
@@ -2151,6 +2229,7 @@ void App::renderNodeDetails() {
     
     // Panel title with Fix ID button if needed
     uint64_t selectedNodeId = m_treeRenderer.getSelectedNodeId();
+    size_t selectedCount = m_treeRenderer.getSelectedNodeIds().size();
     bool showFixButton = false;
     uint32_t expectedId = 0;
     
@@ -2168,13 +2247,8 @@ void App::renderNodeDetails() {
     }
     
     ImGui::Text("Node attribute viewer");
-    if (showFixButton) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Fix ID")) {
-            m_treeManager.updateNodeId(m_selectedSpirit, selectedNodeId);
-            m_treeRenderer.setSelectedNodeId(expectedId);
-        }
-    }
+    // Note: The Fix ID control is shown with the main ID editor below to avoid duplicate
+    // ImGui item IDs when multiple buttons with the same label appear in the same window.
     ImGui::Separator();
     
     if (selectedNodeId == 0) {
@@ -2222,17 +2296,6 @@ void App::renderNodeDetails() {
         ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Id - name: Match!");
     } else {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Id - name: MISMATCH!");
-        ImGui::SameLine();
-        // Green button with black text to fix the ID
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.18f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.75f, 0.25f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.35f, 0.08f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button("Fix ID", ImVec2(100,0))) {
-            selectedNode->id = nodeExpectedId;
-            attrChanged = true;
-        }
-        ImGui::PopStyleColor(4);
     }
     ImGui::Separator();
     ImGui::Spacing();
@@ -2345,31 +2408,102 @@ void App::renderNodeDetails() {
     
     // id - ID (editable text)
     ImGui::TextColored(matchColor, "ID (id):");
+    // Fix ID button directly to the right of the label
+    if (!idMatches && showFixButton) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.18f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.75f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.35f, 0.08f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+        if (ImGui::Button("Fix ID", ImVec2(80, ImGui::GetFrameHeight()))) {
+            uint64_t oldId = selectedNode->id;
+            if (m_treeManager.changeNodeId(m_selectedSpirit, oldId, nodeExpectedId)) {
+                // Rebuild tree to ensure relationships and children arrays are consistent
+                m_treeManager.rebuildTree(m_selectedSpirit);
+                m_treeRenderer.setSelectedNodeId(nodeExpectedId);
+                selectedNode = m_treeManager.getNode(m_selectedSpirit, nodeExpectedId);
+                attrChanged = true;
+                m_lastEditedNodeId = nodeExpectedId;
+                // update idBuf so the input reflects the fixed value immediately
+                // (we update the buffer below after we create it)
+            } else {
+                // fallback: assign directly
+                selectedNode->id = nodeExpectedId;
+                m_treeManager.rebuildTree(m_selectedSpirit);
+                attrChanged = true;
+                m_treeRenderer.setSelectedNodeId(nodeExpectedId);
+                m_lastEditedNodeId = nodeExpectedId;
+            }
+        }
+        ImGui::PopStyleColor(4);
+    }
+
     char idBuf[64];
     snprintf(idBuf, sizeof(idBuf), "%llu", (unsigned long long)selectedNode->id);
     if (ImGui::InputText("##id", idBuf, sizeof(idBuf))) {
         uint64_t newId = strtoull(idBuf, nullptr, 10);
         if (newId != selectedNode->id) {
-            selectedNode->id = newId;
-            // If changed, rebuild relationships
-            m_treeManager.rebuildTree(m_selectedSpirit);
+            uint64_t oldId = selectedNode->id;
+            // Try to change id using manager helper so references are updated
+            if (m_treeManager.changeNodeId(m_selectedSpirit, oldId, newId)) {
+                // Selection should follow the node
+                m_treeRenderer.setSelectedNodeId(newId);
+                selectedNode = m_treeManager.getNode(m_selectedSpirit, newId);
+            } else {
+                // Fallback: direct assignment and rebuild
+                selectedNode->id = newId;
+                m_treeManager.rebuildTree(m_selectedSpirit);
+            }
             attrChanged = true;
+            m_lastEditedNodeId = newId;
         }
     }
+
+    // Show expected ID on the next line for readability when it doesn't match
     if (!idMatches) {
-        ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(expected: %u)", nodeExpectedId);
     }
     ImGui::Spacing();
     
     // nm - Name (editable)
     ImGui::TextColored(matchColor, "Name (nm):");
+
+    // Fix name by ID button to the right of the label
+    if (!idMatches) {
+        ImGui::SameLine();
+        // Check whether a previous attempt already determined this node id is unknown in the loaded file
+        auto& failedSet = m_unknownNameFromLoadedFileIds[m_selectedSpirit];
+        if (failedSet.find(selectedNode->id) != failedSet.end()) {
+            // Show persistent red message for this node
+            ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "Unknown ID from loaded file");
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.18f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+            if (ImGui::Button("Fix name by ID", ImVec2(120, ImGui::GetFrameHeight()))) {
+                std::string restored;
+                if (m_treeManager.getNameFromLoadedFile(m_selectedSpirit, selectedNode->id, &restored)) {
+                    selectedNode->name = restored;
+                    attrChanged = true;
+                    // Remove any previously-recorded failure marker (if present)
+                    failedSet.erase(selectedNode->id);
+                } else {
+                    // Record failure so the message persists for this node
+                    failedSet.insert(selectedNode->id);
+                }
+            }
+            ImGui::PopStyleColor(2);
+        }
+    }
+
+    ImGui::Spacing();
+
     char nameBuf[256];
     strncpy(nameBuf, selectedNode->name.c_str(), sizeof(nameBuf));
     if (ImGui::InputText("##nm", nameBuf, sizeof(nameBuf))) {
         selectedNode->name = std::string(nameBuf);
         attrChanged = true;
     }
+
     ImGui::Spacing();
     
     // spirit - Spirit (dropdown from known spirits)
@@ -2384,67 +2518,86 @@ void App::renderNodeDetails() {
     for (size_t i = 0; i < allSpirits.size(); ++i) {
         if (allSpirits[i] == selectedNode->spirit) currentSpiritIndex = (int)i;
     }
+    // Keep widget widths consistent between list and search modes
+    float spiritWidgetWidth = 160.0f; // reduced width
+    // Suppress showing the opposite toggle button during the same frame when a toggle
+    // action was just taken, to avoid a temporary duplicate button flash
+    bool suppressSearchButtonThisFrame = false;
     if (m_spiritCustomInput) {
-        // Inline text field replaces dropdown; press Enter to apply
-        if (ImGui::InputText("##spirit_inline", m_customSpiritBuf, sizeof(m_customSpiritBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        // Searchable inline input: type to filter suggestions; Enter to commit; click a suggestion to apply
+        ImGui::PushItemWidth(spiritWidgetWidth);
+        bool enterPressed = ImGui::InputText("##spirit_inline", m_customSpiritBuf, sizeof(m_customSpiritBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopItemWidth();
+        // Inline toggle button to return to the list (shows "List")
+        ImGui::SameLine();
+        if (ImGui::Button("List##spirit_toggle_btn", ImVec2(56, 0))) {
+            m_spiritCustomInput = false; // switch back to dropdown/list
+            suppressSearchButtonThisFrame = true;
+        }
+
+        // Build case-insensitive suggestions from available spirits
+        std::string query = m_customSpiritBuf;
+        auto toLower = [](const std::string& s){ std::string r = s; std::transform(r.begin(), r.end(), r.begin(), [](unsigned char c){ return std::tolower(c); }); return r; };
+        std::string ql = toLower(query);
+        std::vector<std::string> suggestions;
+        for (const auto& s : allSpirits) {
+            if (ql.empty() || toLower(s).find(ql) != std::string::npos) {
+                suggestions.push_back(s);
+            }
+            if (suggestions.size() >= 8) break;
+        }
+
+        if (!suggestions.empty()) {
+            ImGui::BeginChild("##spirit_suggestions", ImVec2(spiritWidgetWidth, std::min(200.0f, 20.0f * (float)suggestions.size())), true);
+            for (const auto& s : suggestions) {
+                if (ImGui::Selectable(s.c_str())) {
+                    selectedNode->spirit = s;
+                    attrChanged = true;
+                    m_spiritCustomInput = false;
+                    break;
+                }
+            }
+            ImGui::EndChild();
+        } else {
+            ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,1.0f), "No matches");
+        }
+
+            // Commit typed text on Enter (doesn't create or move trees)
+        if (enterPressed) {
             std::string newSpirit(m_customSpiritBuf);
             if (!newSpirit.empty()) {
-                std::string oldSpirit = selectedNode->spirit;
-                if (newSpirit != oldSpirit) {
-                    // If spirit doesn't exist, create it
-                    if (m_treeManager.getTree(newSpirit) == nullptr) {
-                        m_treeManager.addSpirit(newSpirit, oldSpirit);
-                    }
-                    uint64_t nid = selectedNode->id;
-                    if (m_treeManager.moveNode(oldSpirit, newSpirit, nid)) {
-                        m_selectedSpirit = newSpirit;
-                        m_treeRenderer.setSelectedNodeId(nid);
-                        selectedNode = m_treeManager.getNode(m_selectedSpirit, nid);
-                        attrChanged = true;
-                    } else {
-                        ImGui::TextColored(ImVec4(1.0f,0.3f,0.3f,1.0f), "Failed to move node");
-                    }
-                }
+                selectedNode->spirit = newSpirit;
+                attrChanged = true;
             }
             m_spiritCustomInput = false;
         }
+
+
     } else {
         if (!allSpirits.empty()) {
+            ImGui::PushItemWidth(spiritWidgetWidth);
             if (ImGui::BeginCombo("##spirit", allSpirits[currentSpiritIndex].c_str())) {
                 for (size_t i = 0; i < allSpirits.size(); ++i) {
                     bool selected = (i == (size_t)currentSpiritIndex);
                     if (ImGui::Selectable(allSpirits[i].c_str(), selected)) {
-                        // Move node to new spirit if different
-                        if (allSpirits[i] != selectedNode->spirit) {
-                            std::string oldSpirit = selectedNode->spirit;
-                            uint64_t nid = selectedNode->id;
-                            if (m_treeManager.moveNode(oldSpirit, allSpirits[i], nid)) {
-                                m_selectedSpirit = allSpirits[i];
-                                // Selection remains on the same node id
-                                m_treeRenderer.setSelectedNodeId(nid);
-                                selectedNode = m_treeManager.getNode(m_selectedSpirit, nid);
-                                if (!selectedNode) {
-                                    ImGui::TextColored(ImVec4(1.0f,0.3f,0.3f,1.0f), "Failed to move node");
-                                }
-                            }
-                        }
+                        // Only change the attribute value; do NOT move the node or change the view
+                        selectedNode->spirit = allSpirits[i];
+                        attrChanged = true;
                     }
                 }
                 ImGui::EndCombo();
             }
+            ImGui::PopItemWidth();
         }
     }
 
-    ImGui::SameLine();
-    // Toggle (no text) to switch spirit into free text input
-    {
-        bool newToggle = m_spiritCustomInput;
-        if (ImGui::Checkbox("##spirit_toggle", &newToggle)) {
-            m_spiritCustomInput = newToggle;
-            if (m_spiritCustomInput) {
+// Small toggle button to enable search (shows "Search")
+if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
+            ImGui::SameLine();
+            if (ImGui::Button("Search##spirit_toggle_btn", ImVec2(60, 0))) {
+                m_spiritCustomInput = true;
                 strncpy(m_customSpiritBuf, selectedNode->spirit.c_str(), sizeof(m_customSpiritBuf));
                 m_customSpiritBuf[sizeof(m_customSpiritBuf)-1] = '\0';
-            }
         }
     }
 
@@ -2539,31 +2692,62 @@ void App::renderNodeDetails() {
 
 void App::renderNodeJsonEditor() {
     ImGui::Text("JSON Editor");
+    // Show multiple-selection indicator beside the title when applicable
+    const auto& selectedIdsForJson = m_treeRenderer.getSelectedNodeIds();
+    if (selectedIdsForJson.size() > 1) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "[Multiple selected]");
+    }
     ImGui::Separator();
     
-    uint64_t selectedNodeId = m_treeRenderer.getSelectedNodeId();
+    const auto& selectedIds = m_treeRenderer.getSelectedNodeIds();
+    uint64_t primaryId = m_treeRenderer.getSelectedNodeId();
     
-    if (selectedNodeId == 0 || m_selectedSpirit.empty()) {
+    if (selectedIds.empty() || m_selectedSpirit.empty()) {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a node to edit");
         return;
     }
-    
-    SpiritNode* node = m_treeManager.getNode(m_selectedSpirit, selectedNodeId);
-    if (!node) {
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Node not found");
-        return;
-    }
 
-    // Ensure editor state is initialized when entering editor for a node
-    
-    // If node changed, update buffer
-    if (m_lastEditedNodeId != selectedNodeId) {
-        std::string json = SpiritTreeManager::nodeToJson(*node);
-        strncpy(m_jsonEditBuffer, json.c_str(), sizeof(m_jsonEditBuffer) - 1);
-        m_jsonEditBuffer[sizeof(m_jsonEditBuffer) - 1] = '\0';
-        m_lastEditedNodeId = selectedNodeId;
-        m_jsonParseError = false;
-        m_jsonErrorMsg.clear();
+    // Multiple selected: reflect in JSON editor but make read-only
+    if (selectedIds.size() > 1) {
+        // If selection changed, rebuild the JSON array buffer
+        if (m_lastEditedNodeId != primaryId || m_lastEditedSelectionCount != (int)selectedIds.size()) {
+            std::string arr = "[\n";
+            bool first = true;
+            for (uint64_t id : selectedIds) {
+                SpiritNode* n = m_treeManager.getNode(m_selectedSpirit, id);
+                if (!n) continue;
+                if (!first) arr += ",\n";
+                arr += SpiritTreeManager::nodeToJson(*n);
+                first = false;
+            }
+            arr += "\n]";
+            strncpy(m_jsonEditBuffer, arr.c_str(), sizeof(m_jsonEditBuffer) - 1);
+            m_jsonEditBuffer[sizeof(m_jsonEditBuffer) - 1] = '\0';
+            m_lastEditedNodeId = primaryId;
+            m_lastEditedSelectionCount = (int)selectedIds.size();
+            m_jsonParseError = false;
+            m_jsonErrorMsg.clear();
+        }
+    } else {
+        // Single selection: keep existing editable behavior
+        uint64_t selectedNodeId = primaryId;
+        SpiritNode* node = m_treeManager.getNode(m_selectedSpirit, selectedNodeId);
+        if (!node) {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Node not found");
+            return;
+        }
+
+        // If node changed, update buffer
+        if (m_lastEditedNodeId != selectedNodeId || m_lastEditedSelectionCount != 1) {
+            std::string json = SpiritTreeManager::nodeToJson(*node);
+            strncpy(m_jsonEditBuffer, json.c_str(), sizeof(m_jsonEditBuffer) - 1);
+            m_jsonEditBuffer[sizeof(m_jsonEditBuffer) - 1] = '\0';
+            m_lastEditedNodeId = selectedNodeId;
+            m_lastEditedSelectionCount = 1;
+            m_jsonParseError = false;
+            m_jsonErrorMsg.clear();
+        }
     }
     
     // Calculate available height for the text editor
@@ -2572,21 +2756,28 @@ void App::renderNodeJsonEditor() {
     
     // Multi-line text editor
     ImGuiInputTextFlags flags = ImGuiInputTextFlags_AllowTabInput;
+    bool multiSelected = (m_treeRenderer.getSelectedNodeIds().size() > 1);
+    if (multiSelected) flags |= ImGuiInputTextFlags_ReadOnly;
+
     if (ImGui::InputTextMultiline("##jsoneditor", m_jsonEditBuffer, sizeof(m_jsonEditBuffer),
                                    ImVec2(-1, availHeight), flags)) {
-        // Try to parse and update in real-time
-        uint64_t newNodeId = 0;
-        if (m_treeManager.updateNodeFromJson(m_selectedSpirit, selectedNodeId, m_jsonEditBuffer, &newNodeId)) {
-            m_jsonParseError = false;
-            m_jsonErrorMsg.clear();
-            // If ID changed, update selection to follow the node
-            if (newNodeId != selectedNodeId) {
-                m_treeRenderer.setSelectedNodeId(newNodeId);
-                m_lastEditedNodeId = newNodeId;
+        // Only allow edits when a single node is selected
+        if (!multiSelected) {
+            // Try to parse and update in real-time
+            uint64_t newNodeId = 0;
+            uint64_t selectedNodeId = m_treeRenderer.getSelectedNodeId();
+            if (m_treeManager.updateNodeFromJson(m_selectedSpirit, selectedNodeId, m_jsonEditBuffer, &newNodeId)) {
+                m_jsonParseError = false;
+                m_jsonErrorMsg.clear();
+                // If ID changed, update selection to follow the node
+                if (newNodeId != selectedNodeId) {
+                    m_treeRenderer.setSelectedNodeId(newNodeId);
+                    m_lastEditedNodeId = newNodeId;
+                }
+            } else {
+                m_jsonParseError = true;
+                m_jsonErrorMsg = "Invalid JSON";
             }
-        } else {
-            m_jsonParseError = true;
-            m_jsonErrorMsg = "Invalid JSON";
         }
     }
 
@@ -2675,9 +2866,9 @@ void App::renderStatusBar() {
     }
 
     // Show controls hint on the right
-    ImGui::SameLine(ImGui::GetWindowWidth() - 350);
+    ImGui::SameLine(ImGui::GetWindowWidth() - 450);
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), 
-                      "Scroll: Zoom | Right-Click Drag: Pan | R: Reset");
+                      "Scroll: Zoom | Right-Click Drag: Pan | Shift: Multi-select");
 
     // No native file dialogs used; we display internal ImGui modals when needed.
 }

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
+#include <queue>
 
 namespace Watercan {
 
@@ -77,6 +78,24 @@ bool SpiritTreeManager::loadFromFile(const std::string& filepath) {
     } catch (const std::exception& e) {
         return false;
     }
+}
+
+bool SpiritTreeManager::getNameFromLoadedFile(const std::string& spiritName, uint64_t nodeId, std::string* outName) const {
+    if (m_loadedFile.empty()) return false;
+    try {
+        std::ifstream f(m_loadedFile);
+        if (!f.is_open()) return false;
+        json data = json::parse(f);
+        for (const auto &item : data) {
+            uint64_t id = item.value("id", 0ULL);
+            std::string spirit = item.value("spirit", std::string());
+            if (id == nodeId && spirit == spiritName) {
+                if (outName) *outName = item.value("nm", std::string());
+                return true;
+            }
+        }
+    } catch (...) {}
+    return false;
 }
 
 bool SpiritTreeManager::loadFromString(const std::string& jsonContents) {
@@ -436,30 +455,44 @@ bool SpiritTreeManager::updateNodeId(const std::string& spiritName, uint64_t old
     for (auto& node : tree.nodes) {
         if (node.id == oldId) {
             uint32_t newId = fnv1a32(node.name);
-            
-            // Update parent references in other nodes
-            for (auto& otherNode : tree.nodes) {
-                if (otherNode.dep == oldId) {
-                    otherNode.dep = newId;
-                }
-                // Update children references
-                for (auto& childId : otherNode.children) {
-                    if (childId == oldId) {
-                        childId = newId;
-                    }
-                }
-            }
-            
-            // Update root if needed
-            if (tree.rootNodeId == oldId) {
-                tree.rootNodeId = newId;
-            }
-            
-            node.id = newId;
-            return true;
+            return changeNodeId(spiritName, oldId, newId);
         }
     }
     return false;
+}
+
+bool SpiritTreeManager::changeNodeId(const std::string& spiritName, uint64_t oldId, uint64_t newId) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+
+    SpiritTree& tree = it->second;
+    SpiritNode* target = nullptr;
+    for (auto& node : tree.nodes) {
+        if (node.id == oldId) {
+            target = &node;
+            break;
+        }
+    }
+    if (!target) return false;
+
+    // Update parent references and children references across the tree
+    for (auto& otherNode : tree.nodes) {
+        if (otherNode.dep == oldId) {
+            otherNode.dep = newId;
+        }
+        for (auto& childId : otherNode.children) {
+            if (childId == oldId) {
+                childId = newId;
+            }
+        }
+    }
+
+    // Update root if needed
+    if (tree.rootNodeId == oldId) tree.rootNodeId = newId;
+
+    // Finally set the node's id
+    target->id = newId;
+    return true;
 }
 
 SpiritNode* SpiritTreeManager::getNode(const std::string& spiritName, uint64_t nodeId) {
@@ -501,7 +534,13 @@ bool SpiritTreeManager::updateNodeFromJson(const std::string& spiritName, uint64
         if (data.contains("cst")) node->cost = data["cst"].get<int>();
         if (data.contains("ctyp")) node->costType = data["ctyp"].get<std::string>();
         if (data.contains("dep")) node->dep = data["dep"].get<uint64_t>();
-        if (data.contains("id")) node->id = data["id"].get<uint64_t>();
+        if (data.contains("id")) {
+            uint64_t newId = data["id"].get<uint64_t>();
+            if (newId != node->id) {
+                // Use changeNodeId to update references consistently
+                changeNodeId(spiritName, node->id, newId);
+            }
+        }
         if (data.contains("nm")) node->name = data["nm"].get<std::string>();
         if (data.contains("spirit")) node->spirit = data["spirit"].get<std::string>();
         if (data.contains("typ")) node->type = data["typ"].get<std::string>();
@@ -529,7 +568,53 @@ void SpiritTreeManager::rebuildTree(const std::string& spiritName) {
     // Note: We don't recompute layout here to preserve node positions
 }
 
-void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64_t nodeId) {
+bool SpiritTreeManager::moveNodeBase(const std::string& spiritName, uint64_t nodeId, float dx, float dy) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    SpiritTree& tree = it->second;
+    for (auto& node : tree.nodes) {
+        if (node.id == nodeId) {
+            node.x += dx;
+            node.y += dy;
+            // Update bounds to include the new position
+            tree.minX = std::min(tree.minX, node.x);
+            tree.maxX = std::max(tree.maxX, node.x);
+            tree.minY = std::min(tree.minY, node.y);
+            tree.maxY = std::max(tree.maxY, node.y);
+            tree.width = tree.maxX - tree.minX;
+            tree.height = tree.maxY - tree.minY;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SpiritTreeManager::moveTreeBase(const std::string& spiritName, float dx, float dy) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    SpiritTree& tree = it->second;
+    if (dx == 0.0f && dy == 0.0f) return true;
+
+    tree.minX = std::numeric_limits<float>::infinity();
+    tree.maxX = -std::numeric_limits<float>::infinity();
+    tree.minY = std::numeric_limits<float>::infinity();
+    tree.maxY = -std::numeric_limits<float>::infinity();
+
+    for (auto& node : tree.nodes) {
+        node.x += dx;
+        node.y += dy;
+        tree.minX = std::min(tree.minX, node.x);
+        tree.maxX = std::max(tree.maxX, node.x);
+        tree.minY = std::min(tree.minY, node.y);
+        tree.maxY = std::max(tree.maxY, node.y);
+    }
+    tree.width = tree.maxX - tree.minX;
+    tree.height = tree.maxY - tree.minY;
+    return true;
+}
+
+void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64_t nodeId,
+                                             std::unordered_map<uint64_t, std::pair<float,float>>* outShifts) {
     auto it = m_trees.find(spiritName);
     if (it == m_trees.end()) return;
     
@@ -599,9 +684,85 @@ void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64
             }
         }
         
+        // If caller requested, record the visual shift (oldBase - newBase) so the renderer can
+        // apply an immediate offset that will be springed back to zero (producing a smooth motion)
+        if (outShifts) {
+            float dx = child->x - x; // oldX - newX
+            float dy = child->y - y; // oldY - newY
+            (*outShifts)[child->id] = std::make_pair(dx, dy);
+        }
+
         child->x = x;
         child->y = y;
     }
+}
+
+bool SpiritTreeManager::layoutSubtreeAndCollectShifts(const std::string& spiritName, uint64_t rootNodeId,
+                                       std::unordered_map<uint64_t, std::pair<float,float>>* outShifts) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    SpiritTree& tree = it->second;
+
+    // Build id lookup and find root
+    std::unordered_map<uint64_t, SpiritNode*> idToNode;
+    SpiritNode* root = nullptr;
+    for (auto& n : tree.nodes) {
+        idToNode[n.id] = &n;
+        if (n.id == rootNodeId) root = &n;
+    }
+    if (!root) return false;
+
+    // Collect subtree nodes
+    std::vector<uint64_t> stack;
+    std::unordered_set<uint64_t> subtreeSet;
+    stack.push_back(root->id);
+    while (!stack.empty()) {
+        uint64_t cur = stack.back(); stack.pop_back();
+        if (subtreeSet.count(cur)) continue;
+        subtreeSet.insert(cur);
+        auto itn = idToNode.find(cur);
+        if (itn == idToNode.end()) continue;
+        for (uint64_t c : itn->second->children) stack.push_back(c);
+    }
+
+    // Save old positions for subtree nodes
+    std::unordered_map<uint64_t, std::pair<float,float>> oldPos;
+    for (uint64_t id : subtreeSet) {
+        auto itn = idToNode.find(id);
+        if (itn != idToNode.end()) oldPos[id] = std::make_pair(itn->second->x, itn->second->y);
+    }
+
+    // Re-layout the subtree rooted at 'root' using current root->x, root->y
+    layoutSubtree(tree, *root, root->x, root->y, 0);
+
+    // Recompute bounds for the whole tree
+    tree.minX = tree.maxX = 0.0f;
+    tree.minY = tree.maxY = 0.0f;
+    for (const auto& n : tree.nodes) {
+        tree.minX = std::min(tree.minX, n.x);
+        tree.maxX = std::max(tree.maxX, n.x);
+        tree.minY = std::min(tree.minY, n.y);
+        tree.maxY = std::max(tree.maxY, n.y);
+    }
+    tree.width = tree.maxX - tree.minX;
+    tree.height = tree.maxY - tree.minY;
+
+    // Compute shifts for subtree nodes (oldBase - newBase) excluding the root node
+    if (outShifts) {
+        for (auto &kv : oldPos) {
+            uint64_t id = kv.first;
+            if (id == rootNodeId) continue; // skip root (dragged node kept directly under cursor)
+            auto itn = idToNode.find(id);
+            if (itn == idToNode.end()) continue;
+            float oldX = kv.second.first;
+            float oldY = kv.second.second;
+            float newX = itn->second->x;
+            float newY = itn->second->y;
+            (*outShifts)[id] = std::make_pair(oldX - newX, oldY - newY);
+        }
+    }
+
+    return true;
 }
 
 uint64_t SpiritTreeManager::createNode(const std::string& spiritName, float x, float y) {
@@ -712,5 +873,7 @@ bool SpiritTreeManager::moveNode(const std::string& fromSpirit, const std::strin
 
     return true;
 }
+
+
 
 } // namespace Watercan
