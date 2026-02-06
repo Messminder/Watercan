@@ -69,6 +69,38 @@ FetchContent_MakeAvailable(stb)
 # Find OpenGL
 find_package(OpenGL REQUIRED)
 
+# Optional: FFmpeg (libav*) for embedded video decode + SDL2 for audio
+find_package(PkgConfig)
+if (PKG_CONFIG_FOUND)
+    pkg_check_modules(FF_AVFORMAT libavformat)
+    pkg_check_modules(FF_AVCODEC libavcodec)
+    pkg_check_modules(FF_SWSCALE libswscale)
+    pkg_check_modules(FF_AVUTIL libavutil)
+    pkg_check_modules(FF_SWRESAMPLE libswresample)
+    pkg_check_modules(SDL2 sdl2)
+endif()
+if (FF_AVFORMAT_FOUND AND FF_AVCODEC_FOUND AND FF_SWSCALE_FOUND AND FF_AVUTIL_FOUND)
+    add_compile_definitions(HAVE_FFMPEG)
+    include_directories(${FF_AVFORMAT_INCLUDE_DIRS} ${FF_AVCODEC_INCLUDE_DIRS} ${FF_SWSCALE_INCLUDE_DIRS} ${FF_AVUTIL_INCLUDE_DIRS})
+    list(APPEND EXTRA_LIBS ${FF_AVFORMAT_LIBRARIES} ${FF_AVCODEC_LIBRARIES} ${FF_SWSCALE_LIBRARIES} ${FF_AVUTIL_LIBRARIES})
+    if (FF_SWRESAMPLE_FOUND)
+        include_directories(${FF_SWRESAMPLE_INCLUDE_DIRS})
+        list(APPEND EXTRA_LIBS ${FF_SWRESAMPLE_LIBRARIES})
+    else()
+        # Some systems provide libswresample but pkg-config may not be configured; try linking explicitly as a fallback
+        list(APPEND EXTRA_LIBS swresample)
+    endif()
+    message(STATUS "FFmpeg libraries found: video decode supported")
+else()
+    message(STATUS "FFmpeg libs not fully found; embedded video decode disabled")
+endif()
+if (SDL2_FOUND)
+    add_compile_definitions(HAVE_SDL2)
+    include_directories(${SDL2_INCLUDE_DIRS})
+    list(APPEND EXTRA_LIBS ${SDL2_LIBRARIES})
+    message(STATUS "SDL2 found: audio support enabled")
+endif()
+
 # ImGui library
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -93,6 +125,7 @@ add_executable(Watercan
     src/tree_renderer.cpp
     src/stb_image_impl.cpp
     src/app_type_colors.cpp
+    src/video_player.cpp
 )
 
 target_include_directories(Watercan PRIVATE 
@@ -112,6 +145,26 @@ target_link_libraries(Watercan PRIVATE
     glfw
     OpenGL::GL
 )
+
+# Link extra optional libraries detected (FFmpeg/SDL2 etc.)
+if(EXTRA_LIBS)
+    target_link_libraries(Watercan PRIVATE ${EXTRA_LIBS})
+endif()
+# Ensure swresample is linked when using in-process resampling (best-effort)
+find_library(SWRESAMPLE_LIB swresample)
+if(SWRESAMPLE_LIB)
+    target_link_libraries(Watercan PRIVATE ${SWRESAMPLE_LIB})
+endif()
+# Some older toolchains may need explicit references to libav* at link tail; repeat important ffmpeg libs if found
+if(FF_AVUTIL_FOUND)
+    target_link_libraries(Watercan PRIVATE ${FF_AVUTIL_LIBRARIES})
+endif()
+if(FF_AVFORMAT_FOUND)
+    target_link_libraries(Watercan PRIVATE ${FF_AVFORMAT_LIBRARIES})
+endif()
+if(FF_AVCODEC_FOUND)
+    target_link_libraries(Watercan PRIVATE ${FF_AVCODEC_LIBRARIES})
+endif()
 
 # If requested, attempt to make linker prefer static runtime libs (best-effort).
 if(BUILD_SINGLE_BINARY)
@@ -172,7 +225,10 @@ if(BUILD_WINDOWS_SINGLE_EXE OR BUILD_SINGLE_EXE)
 
     # Embed About image only (JSON will not be embedded in the exe)
     set(EMBED_IMG_CPP "${EMBED_DIR}/embedded_about_image.cpp")
-    embed_file_as_cpp(${CMAKE_CURRENT_SOURCE_DIR}/res/TheBrokenMind.png ${EMBED_IMG_CPP} embedded_about_image_png)
+    embed_file_as_cpp(${CMAKE_CURRENT_SOURCE_DIR}/res/TheBrokenClip.png ${EMBED_IMG_CPP} embedded_about_image_png)
+
+# mpv support intentionally removed: using FFmpeg-based VideoPlayer instead
+
 
     # Add embedded image source to list and include in the target
     list(APPEND EXTRA_EMBEDDED_SOURCES ${EMBED_IMG_CPP})

@@ -4,6 +4,12 @@
 #include <queue>
 #include <unordered_map>
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
 
 namespace Watercan {
 
@@ -219,6 +225,9 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
     
     ImVec2 canvasPos = ImGui::GetCursorScreenPos();
     ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+    // Remember the canvas geometry so external callers can query node positions later
+    m_lastCanvasPos = canvasPos;
+    m_lastCanvasSize = canvasSize;
     
     // Ensure minimum size
     if (canvasSize.x < 50.0f) canvasSize.x = 50.0f;
@@ -338,8 +347,8 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                 uint64_t clickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
                 if (clickedNode != NO_NODE_ID) {
                     // Check for multi-select (SHIFT held)
-                    ImGuiIO& io = ImGui::GetIO();
-                    bool shift = io.KeyShift;
+                    ImGuiIO& ioLocal = ImGui::GetIO();
+                    bool shift = ioLocal.KeyShift;
 
                     if (shift) {
                         // Toggle selection membership
@@ -398,15 +407,22 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                         }
                     }
                     actionOccurred = true;
+                } else {
+                    // Clicked empty space: deselect all nodes
+                    clearSelection();
+                    float worldX = (mousePos.x - origin.x) / m_zoom;
+                    float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
+                    if (outClickPos) { outClickPos->x = worldX; outClickPos->y = worldY; }
+                    actionOccurred = true;
                 }
             }
-            
+
             // Handle node/tree dragging
             if ((m_isDraggingNode || m_isDraggingTree) && m_draggedNodeId != NO_NODE_ID) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     if (m_isDraggingTree) {
                         // Tree drag: compute desired base position for the dragged node and report the
-                        // delta to the caller so it can immediately shift the model (move all nodes).
+                        // delta to the caller so it can call moveTreeBase
                         float worldX = (io.MousePos.x - origin.x) / m_zoom;
                         float worldY = -(io.MousePos.y - origin.y) / m_zoom;  // Invert Y
 
@@ -427,7 +443,6 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                         }
                     } else {
                         // Node drag (free-floating): stick node under cursor
-                        // Compute the current mouse world position
                         float worldX = (io.MousePos.x - origin.x) / m_zoom;
                         float worldY = -(io.MousePos.y - origin.y) / m_zoom;  // Invert Y
 
@@ -462,9 +477,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                             ImVec2 finalOffset = m_nodeOffsets[m_draggedNodeId];
                             if (outDragReleasedNodeId) *outDragReleasedNodeId = m_draggedNodeId;
                             if (outDragFinalOffset) { outDragFinalOffset->x = finalOffset.x; outDragFinalOffset->y = finalOffset.y; }
-                            // Do NOT erase offsets here; the app will call moveNodeBase and then
-                            // notify the renderer to clear the offset so there is no frame where
-                            // the visual position snaps back to the old base.
+                            // Do NOT erase offsets here; caller will commit base and then tell renderer to clear.
                         }
                     }
                     // End dragging state
@@ -596,6 +609,72 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                          IM_COL32(255, 80, 80, 255), 0.0f, 0, 2.0f);
     }
     
+    // Draw delete animations (on top of overlays)
+    if (!m_deleteAnims.empty()) {
+        ImGuiIO &ioLocal = ImGui::GetIO();
+        float dt = ioLocal.DeltaTime;
+        double now = ImGui::GetTime();
+        // Faster but still gentle gravity for quicker animation
+        float gravity = 650.0f; // px/s^2 downward
+        std::vector<uint64_t> toErase;
+        for (auto &kv : m_deleteAnims) {
+            uint64_t id = kv.first;
+            DeleteAnim &a = kv.second;
+            // Integrate velocities (mild air drag reduced so it stays snappy)
+            a.leftVel.y += gravity * dt;
+            a.rightVel.y += gravity * dt;
+            a.leftVel.x *= (1.0f - 0.02f * dt);
+            a.rightVel.x *= (1.0f - 0.02f * dt);
+            a.leftPos.x += a.leftVel.x * dt;
+            a.leftPos.y += a.leftVel.y * dt;
+            a.rightPos.x += a.rightVel.x * dt;
+            a.rightPos.y += a.rightVel.y * dt;
+            // Slightly faster rotation for a livelier tilt
+            a.leftRot += 2.4f * dt;
+            a.rightRot -= 2.4f * dt;
+            double elapsed = now - a.startTime;
+            float t = (float)(elapsed / a.lifetime);
+            if (t > 1.0f) t = 1.0f;
+            a.alpha = 1.0f - t;
+
+            // Draw semicircle halves
+            ImU32 col = a.color;
+            auto applyAlpha = [&](ImU32 c, float aalpha) {
+                unsigned int r = (c >> IM_COL32_R_SHIFT) & 0xFF;
+                unsigned int g = (c >> IM_COL32_G_SHIFT) & 0xFF;
+                unsigned int b = (c >> IM_COL32_B_SHIFT) & 0xFF;
+                unsigned int a_ = (unsigned int)(aalpha * 255.0f);
+                return IM_COL32(r, g, b, a_);
+            };
+            ImU32 colA = applyAlpha(col, a.alpha);
+
+            int steps = 14;
+            std::vector<ImVec2> pts;
+            pts.reserve(steps+2);
+            for (int i = 0; i <= steps; ++i) {
+                float ang = M_PI * 0.5f + (M_PI * (float)i / (float)steps);
+                ImVec2 p(a.leftPos.x + cosf(ang) * a.radius * m_zoom, a.leftPos.y + sinf(ang) * a.radius * m_zoom);
+                pts.push_back(p);
+            }
+            drawList->AddConvexPolyFilled(pts.data(), (int)pts.size(), colA);
+            drawList->AddPolyline(pts.data(), (int)pts.size(), applyAlpha(IM_COL32(60,60,60,255), a.alpha), false, 1.5f);
+            pts.clear();
+            for (int i = 0; i <= steps; ++i) {
+                float ang = -M_PI * 0.5f + (M_PI * (float)i / (float)steps);
+                ImVec2 p(a.rightPos.x + cosf(ang) * a.radius * m_zoom, a.rightPos.y + sinf(ang) * a.radius * m_zoom);
+                pts.push_back(p);
+            }
+            drawList->AddConvexPolyFilled(pts.data(), (int)pts.size(), colA);
+            drawList->AddPolyline(pts.data(), (int)pts.size(), applyAlpha(IM_COL32(60,60,60,255), a.alpha), false, 1.5f);
+            drawList->AddLine(ImVec2(a.leftPos.x + a.radius * m_zoom * 0.2f, a.leftPos.y), ImVec2(a.rightPos.x - a.radius * m_zoom * 0.2f, a.rightPos.y), applyAlpha(IM_COL32(40,40,40,255), a.alpha), 1.0f);
+
+            if (elapsed >= a.lifetime) {
+                toErase.push_back(id);
+            }
+        }
+        for (uint64_t id : toErase) m_deleteAnims.erase(id);
+    }
+
     // Draw legend anchored at top-left of the canvas showing indicator letters (drawn last so it stays on top)
     // Don't draw the legend for read-only previews or when the Color Codes modal is open
     if (!readOnlyPreview && !ImGui::IsPopupOpen("Color Codes")) {
@@ -682,6 +761,44 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
     m_currentRenderIsPreview = false;
 
     return actionOccurred;
+}
+
+ImU32 TreeRenderer::getNodeFillColorForNode(const SpiritNode& node) const {
+    // Reuse existing color logic used by drawNode
+    return getNodeColor(node);
+}
+
+void TreeRenderer::startDeleteAnimation(uint64_t nodeId, float worldX, float worldY, ImU32 fillColor) {
+    // Compute screen position for the node's world coords
+    ImVec2 origin;
+    origin.x = m_lastCanvasPos.x + m_lastCanvasSize.x * 0.5f + m_pan.x * m_zoom;
+    origin.y = m_lastCanvasPos.y + m_lastCanvasSize.y * 0.75f + m_pan.y * m_zoom;
+    ImVec2 center;
+    center.x = origin.x + worldX * m_zoom;
+    center.y = origin.y - worldY * m_zoom; // invert Y
+
+    DeleteAnim a;
+    a.radius = NODE_RADIUS;
+    // Keep small separation; focus on speed rather than drama
+    float sep = a.radius * 0.12f * m_zoom;
+    a.leftPos = ImVec2(center.x - sep, center.y);
+    a.rightPos = ImVec2(center.x + sep, center.y);
+
+    // Seed pseudo-random velocities per-node for variation
+    float seed = fmodf((float)nodeId * 137.0f + (float)ImGui::GetTime() * 37.0f, 1000.0f);
+    // Increase horizontal separation velocity and upward launch for snappier animation
+    a.leftVel = ImVec2(-65.0f - fmodf(seed, 30.0f), -180.0f - fmodf(seed, 30.0f));
+    a.rightVel = ImVec2(65.0f + fmodf(seed, 30.0f), -180.0f - fmodf(seed, 30.0f));
+    // Slightly livelier initial rotation
+    a.leftRot = -0.6f * (0.5f + fmodf(seed, 2.0f));
+    a.rightRot = 0.9f * (0.5f + fmodf(seed, 2.0f));
+    a.alpha = 1.0f;
+    a.startTime = ImGui::GetTime();
+    // Shorter lifetime for faster fade
+    a.lifetime = 1.2f;
+    a.color = fillColor;
+
+    m_deleteAnims[nodeId] = a;
 }
 
 void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node, 
@@ -886,12 +1003,40 @@ void TreeRenderer::drawConnection(ImDrawList* drawList, const SpiritNode& parent
     ctrl1.x = ctrl1.x * (1.0f - blend) + origCtrl1.x * blend;
     ctrl1.y = ctrl1.y * (1.0f - blend) + origCtrl1.y * blend;
     
-    // Color changes based on stretch - more orange when stretched
+    // Classification: determine whether this connection is the main trunk (vertical
+    // child above parent) or a NW/NE leaf (diagonal left/right and a leaf node).
+    float horizDelta = child.x - parent.x; // world coords
+    const float trunkThreshold = 30.0f; // small horizontal tolerance for trunk
+    const float leafThreshold = 40.0f;  // threshold to consider NW/NE
+    bool isTrunk = (std::fabs(horizDelta) <= trunkThreshold);
+    bool isLeafNW = (child.children.empty() && horizDelta < -leafThreshold);
+    bool isLeafNE = (child.children.empty() && horizDelta > leafThreshold);
+
+    // Choose base colors for special cases (alpha follows previous value)
+    ImU32 trunkColor = IM_COL32(255, 220, 100, 200); // gold
+    ImU32 leafLimeColor = IM_COL32(150, 255, 50, 200); // lime
+
+    // Default color changes based on stretch - more orange when stretched
     int r = (int)(120 + 80 * tensionFactor);
     int g = (int)(140 - 40 * tensionFactor);
     int b = (int)(160 - 100 * tensionFactor);
-    ImU32 lineColor = IM_COL32(r, g, b, 200);
-    
+    ImU32 defaultColor = IM_COL32(r, g, b, 200);
+
+    // Final color selection: special-case trunk and leaf NW/NE
+    ImU32 lineColor = defaultColor;
+    if (isTrunk) {
+        // Slightly modulate based on tension to keep elastic feel
+        int tr = (int)(255 - 30.0f * tensionFactor);
+        int tg = (int)(220 - 30.0f * tensionFactor);
+        int tb = (int)(100 - 20.0f * tensionFactor);
+        lineColor = IM_COL32(tr, tg, tb, 200);
+    } else if (isLeafNW || isLeafNE) {
+        int lr = (int)(150 + 40.0f * tensionFactor);
+        int lg = (int)(255 - 10.0f * tensionFactor);
+        int lb = (int)(50 - 10.0f * tensionFactor);
+        lineColor = IM_COL32(lr, lg, lb, 200);
+    }
+
     // Thickness can increase slightly when stretched
     float thickness = CONNECTION_THICKNESS * zoom * (1.0f + 0.5f * tensionFactor);
     
@@ -975,7 +1120,7 @@ void TreeRenderer::resetView() {
     m_selectedNodeId = NO_NODE_ID;
 }
 
-uint64_t TreeRenderer::getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom) {
+uint64_t TreeRenderer::getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom) const {
     if (!tree) return 0;
     
     float radius = NODE_RADIUS * zoom;

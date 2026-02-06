@@ -809,7 +809,8 @@ uint64_t SpiritTreeManager::createNode(const std::string& spiritName, float x, f
     newNode.isAdventurePass = false;
     newNode.x = x;
     newNode.y = y;
-    
+    newNode.isNew = true;
+
     // Add to tree
     tree.nodes.push_back(newNode);
     

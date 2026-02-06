@@ -60,6 +60,15 @@ public:
     bool isNodeSelected(uint64_t id) const { return m_selectedNodes.count(id) > 0; }
     void addNodeToSelection(uint64_t id) { if (id != NO_NODE_ID) { m_selectedNodes.insert(id); m_selectedNodeId = id; } }
     void removeNodeFromSelection(uint64_t id) { bool wasPrimary = (m_selectedNodeId == id); m_selectedNodes.erase(id); if (m_selectedNodes.empty()) m_selectedNodeId = NO_NODE_ID; else if (wasPrimary) m_selectedNodeId = *m_selectedNodes.begin(); }
+
+    // Public helper: query which node (if any) is located at the given screen position using the
+    // renderer's last-known canvas origin and zoom. Returns NO_NODE_ID when none.
+    uint64_t getNodeAtScreenPosition(const SpiritTree* tree, ImVec2 screenPos) const { 
+        ImVec2 origin;
+        origin.x = m_lastCanvasPos.x + m_lastCanvasSize.x * 0.5f + m_pan.x * m_zoom;
+        origin.y = m_lastCanvasPos.y + m_lastCanvasSize.y * 0.75f + m_pan.y * m_zoom;
+        return getNodeAtPosition(tree, screenPos, origin, m_zoom);
+    }
     
     // Reset all node offsets (return to computed positions)
     void resetNodeOffsets() { m_nodeOffsets.clear(); m_nodeVelocities.clear(); }
@@ -77,6 +86,13 @@ public:
     void setFreeFloating(uint64_t nodeId) { m_freeFloatingNodes.insert(nodeId); }
     void clearFreeFloating(uint64_t nodeId) { m_freeFloatingNodes.erase(nodeId); }
     bool isFreeFloating(uint64_t nodeId) const { return m_freeFloatingNodes.count(nodeId) > 0; }
+
+    // Deletion animation: start an animated 'split & fall & fade' for a node that's
+    // about to be deleted. worldX/worldY are node coordinates in world space.
+    void startDeleteAnimation(uint64_t nodeId, float worldX, float worldY, ImU32 fillColor = IM_COL32(190, 60, 60, 255));
+
+    // Query a node fill color for a node (helper used by App when starting delete)
+    ImU32 getNodeFillColorForNode(const SpiritNode& node) const; 
     
 private:
     void drawNode(ImDrawList* drawList, const SpiritNode& node, 
@@ -88,7 +104,7 @@ private:
     ImU32 getNodeBorderColor(const SpiritNode& node) const;
     
     // Check if mouse is over a node, returns node ID or NO_NODE_ID when none
-    uint64_t getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom);    
+    uint64_t getNodeAtPosition(const SpiritTree* tree, ImVec2 mousePos, ImVec2 origin, float zoom) const;    
     // Get node offset from original position
     ImVec2 getNodeOffset(uint64_t nodeId) const;
     
@@ -97,6 +113,10 @@ private:
     ImVec2 m_pan = {0.0f, 0.0f};
     bool m_isPanning = false;
     ImVec2 m_lastMousePos = {0.0f, 0.0f};
+
+    // Last canvas geometry (updated each render) so callers can query node positions
+    ImVec2 m_lastCanvasPos = {0.0f, 0.0f};
+    ImVec2 m_lastCanvasSize = {0.0f, 0.0f};
     
     // Selection state
     uint64_t m_selectedNodeId = NO_NODE_ID;
@@ -141,6 +161,22 @@ private:
     static constexpr float NODE_RADIUS = 25.0f;
     static constexpr float CONNECTION_THICKNESS = 2.0f;
 
+    // Deletion animations (nodes that have been removed from the model but are still
+    // animating on-screen as two halves)
+    struct DeleteAnim {
+        ImVec2 leftPos;
+        ImVec2 rightPos;
+        ImVec2 leftVel;
+        ImVec2 rightVel;
+        float leftRot = 0.0f;
+        float rightRot = 0.0f;
+        float alpha = 1.0f;
+        double startTime = 0.0;
+        float lifetime = 1.2f; // seconds
+        float radius = NODE_RADIUS;
+        ImU32 color = IM_COL32(190, 60, 60, 255);
+    };
+    std::unordered_map<uint64_t, DeleteAnim> m_deleteAnims;
 
 };
 

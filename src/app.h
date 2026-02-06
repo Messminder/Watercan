@@ -2,6 +2,7 @@
 
 #include "spirit_tree.h"
 #include "tree_renderer.h"
+#include "video_player.h"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -28,7 +29,8 @@ public:
     void shutdown();
 
     // Try loading about image (used to lazily reload if missing at runtime)
-    void loadAboutImage();
+    // imageName: "TheBrokenMind.png" (default) or "TheBrokenClip.png" (while video plays)
+    void loadAboutImage(const std::string& imageName = "TheBrokenMind.png");
     // Open a URL in the default browser (platform-dependent)
     void openUrl(const std::string& url);
     
@@ -72,6 +74,20 @@ private:
     unsigned int m_aboutImageTexture = 0;
     int m_aboutImageWidth = 0;
     int m_aboutImageHeight = 0;
+    std::string m_currentAboutImageName;  // Track which image is loaded
+
+    // Embedded local video player (optional via FFmpeg)
+    VideoPlayer m_videoPlayer;
+    // Binary is usually run from the build directory, so prefer a path relative to that
+    std::string m_aboutVideoPath = "../res/clippy.mp4";
+
+    // Playback status and transient message for About dialog
+    std::string m_aboutVideoNote;
+    double m_aboutVideoNoteUntil = 0.0;
+    
+    // Hidden video controls reveal (CTRL+ALT+C for 5 seconds)
+    double m_videoControlsKeyHeldSince = 0.0;
+    bool m_videoControlsRevealed = false;
     
     // JSON editor state
     uint64_t m_lastEditedNodeId = 0;
@@ -165,6 +181,9 @@ private:
     SpiritTree m_previewTree;
     bool m_previewLoaded = false;
 
+    // Transient message shown at the top of Tree Viewer (eg. link failures)
+    std::string m_treeMessage;
+    std::chrono::steady_clock::time_point m_treeMessageUntil;
     // Known typ values seen across loaded files (persisted in-memory during session)
     std::unordered_set<std::string> m_knownTypes;
 

@@ -17,6 +17,7 @@ struct SpiritNode {
     std::string costType;
     int cost = 0;
     bool isAdventurePass = false;
+    bool isNew = false; // true for nodes created at runtime (not originally in loaded file)
     
     // Computed layout information
     float x = 0.0f;

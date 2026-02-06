@@ -123,6 +123,9 @@ bool App::init() {
     // Load About image (initial attempt)
     loadAboutImage();
 
+    // Video player will be lazy-initialized when a file is opened
+    fprintf(stderr, "[init] Video player support: %s\n", ("HAVE_FFMPEG"));
+
 
 // Note: The JSON data is not embedded in the executable by design; the app will load
 // `seasonal_spiritshop.json` from the working directory or via File > Open.
@@ -960,6 +963,9 @@ void App::shutdown() {
     }
     
     if (m_window) {
+        // Shutdown video player
+        m_videoPlayer.close();
+
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -970,11 +976,18 @@ void App::shutdown() {
     }
 }
 
-void App::loadAboutImage() {
-    // If already loaded, nothing to do
-    if (m_aboutImageTexture) return;
+void App::loadAboutImage(const std::string& imageName) {
+    // If already loaded with the same image, nothing to do
+    if (m_aboutImageTexture && m_currentAboutImageName == imageName) return;
+    
+    // If switching images, delete existing texture first
+    if (m_aboutImageTexture) {
+        glDeleteTextures(1, &m_aboutImageTexture);
+        m_aboutImageTexture = 0;
+    }
 
 #if defined(BUILD_SINGLE_EXE) || defined(BUILD_WINDOWS_SINGLE_EXE)
+    // For single-exe builds, embedded image is used (skip dynamic loading)
     // Try to load embedded about image first
     fprintf(stderr, "[loadAboutImage] embedded_about_image_png_len=%zu\n", embedded_about_image_png_len);
     if (embedded_about_image_png_len > 0) {
@@ -990,6 +1003,7 @@ void App::loadAboutImage() {
             m_aboutImageWidth = width;
             m_aboutImageHeight = height;
             stbi_image_free(data);
+            m_currentAboutImageName = imageName;
             return;
         } else {
             fprintf(stderr, "[loadAboutImage] failed to decode embedded image\n");
@@ -998,19 +1012,19 @@ void App::loadAboutImage() {
 #endif
 
     // Fall back to loading from disk (useful for development builds)
-    const char* candidates[] = {
-        "../res/TheBrokenMind.png",
-        "res/TheBrokenMind.png",
-        "./res/TheBrokenMind.png"
+    std::string candidates[] = {
+        "../res/" + imageName,
+        "res/" + imageName,
+        "./res/" + imageName
     };
 
-    for (const char* path : candidates) {
+    for (const std::string& path : candidates) {
         int width = 0, height = 0, channels = 0;
-        unsigned char* data = stbi_load(path, &width, &height, &channels, 4);
-        fprintf(stderr, "[loadAboutImage] trying disk path '%s'... %s\n", path, data ? "found" : "not found");
+        unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+        fprintf(stderr, "[loadAboutImage] trying disk path '%s'... %s\n", path.c_str(), data ? "found" : "not found");
         if (!data) continue;
 
-        fprintf(stderr, "[loadAboutImage] loaded disk image %dx%d from '%s'\n", width, height, path);
+        fprintf(stderr, "[loadAboutImage] loaded disk image %dx%d from '%s'\n", width, height, path.c_str());
         glGenTextures(1, &m_aboutImageTexture);
         glBindTexture(GL_TEXTURE_2D, m_aboutImageTexture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1019,6 +1033,7 @@ void App::loadAboutImage() {
         m_aboutImageWidth = width;
         m_aboutImageHeight = height;
         stbi_image_free(data);
+        m_currentAboutImageName = imageName;
         break;
     }
 
@@ -1503,7 +1518,8 @@ void App::renderUI() {
         ImGui::EndPopup();
     }
 
-    if (ImGui::BeginPopupModal("About Watercan", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::SetNextWindowSize(ImVec2(750, 550), ImGuiCond_FirstUseEver);
+    if (ImGui::BeginPopupModal("About Watercan", nullptr, ImGuiWindowFlags_NoResize)) {
         ImGui::Text("Watercan %s - Vibecoded by Dusk//Night with Copilot wheelchair assistance", WATERCAN_VERSION);
         ImGui::Separator();
         ImGui::Text("JSON-based dependency tree viewer and editor specialized for Sky: Children of the Light");
@@ -1515,27 +1531,164 @@ void App::renderUI() {
             
             ImGui::SameLine();
             
-            // Text beside image, left-aligned
+            // Text beside image, left-aligned, with video below the text
             ImGui::BeginGroup();
             ImGui::Text("For use with private servers and their communities.");
             ImGui::Text("TGC can use it too but they have to talk to me first.");
             ImGui::Text("Desired to be under the permissive MIT license, see LICENSE for details.");
-            ImGui::EndGroup();
+
+            // Video preview below the text, still beside the image
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            
+            // Calculate video size to fill remaining space to bottom-right
+            // Get current position and window bounds
+            ImVec2 vidStartPos = ImGui::GetCursorScreenPos();
+            ImVec2 winPos = ImGui::GetWindowPos();
+            ImVec2 winSize = ImGui::GetWindowSize();
+            float padding = ImGui::GetStyle().WindowPadding.x;
+            float buttonRowHeight = 30.0f; // space for Close/License buttons
+            
+            float availWidth = (winPos.x + winSize.x - padding) - vidStartPos.x;
+            float availHeight = (winPos.y + winSize.y - padding - buttonRowHeight) - vidStartPos.y;
+            
+            // Maintain 16:9 aspect ratio, fit within available space
+            float vidAspect = 16.0f / 9.0f;
+            float fitByWidth = availWidth;
+            float fitByHeight = availHeight * vidAspect;
+            float vidWidth = (fitByWidth < fitByHeight) ? fitByWidth : fitByHeight;
+            float vidHeight = vidWidth / vidAspect;
+            
+            // Minimum size
+            if (vidWidth < 200.0f) { vidWidth = 200.0f; vidHeight = vidWidth / vidAspect; }
+            
+            ImVec2 vidSize(vidWidth, vidHeight);
+            
+            ImGui::BeginGroup();
+            ImGui::PushID("about_video");
+
+            // Check for CTRL+ALT+C held for 5 seconds to reveal hidden controls
+            bool ctrlAltCHeld = ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt && ImGui::IsKeyDown(ImGuiKey_C);
+            if (ctrlAltCHeld) {
+                if (m_videoControlsKeyHeldSince == 0.0) {
+                    m_videoControlsKeyHeldSince = ImGui::GetTime();
+                } else if (ImGui::GetTime() - m_videoControlsKeyHeldSince >= 5.0) {
+                    m_videoControlsRevealed = true;
+                }
+            } else {
+                m_videoControlsKeyHeldSince = 0.0; // reset timer when released
+            }
+
+            // Play/Stop buttons - only visible after secret key combo
+            bool wantPlay = false;
+            bool wantStop = false;
+            if (m_videoControlsRevealed) {
+                if (ImGui::Button(m_videoPlayer.isPlaying() ? "Pause" : "Play", ImVec2(80, 0))) {
+                    wantPlay = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Stop", ImVec2(80,0))) {
+                    wantStop = true;
+                }
+            }
+            
+            // Handle button actions (even though buttons are hidden, keep logic for keyboard shortcuts etc)
+            if (wantPlay) {
+                if (!m_videoPlayer.isOpen()) {
+                    // Try opening the configured path, but also try a few likely fallbacks so the
+                    // About dialog works regardless of current working directory when launching.
+                    std::vector<std::string> candidates = {
+                        m_aboutVideoPath,
+                        std::string("res/clippy.mp4"),
+                        std::string("./res/clippy.mp4"),
+                        std::string("../res/clippy.mp4")
+                    };
+                    bool opened = false;
+                    for (const auto &cand : candidates) {
+                        FILE* f = fopen(cand.c_str(), "rb");
+                        if (f) { fclose(f);
+                            if (m_videoPlayer.open(cand)) { opened = true; break; }
+                        }
+                    }
+                    if (!opened) {
+                        m_aboutVideoNote = "Failed to open video file. Place the file at the above path.";
+                        m_aboutVideoNoteUntil = ImGui::GetTime() + 4.0;
+                    } else {
+                        m_videoPlayer.play();
+                        loadAboutImage("TheBrokenClip.png");
+                    }
+                } else {
+                    if (!m_videoPlayer.isPlaying()) {
+                        m_videoPlayer.play();
+                        loadAboutImage("TheBrokenClip.png");
+                    } else {
+                        m_videoPlayer.pause();
+                    }
+                }
+            }
+            if (wantStop) {
+                m_videoPlayer.pause();
+                m_videoPlayer.close();
+                loadAboutImage("TheBrokenMind.png");
+            }
+
+            // Render video frame into texture and show it
+            unsigned int tex = m_videoPlayer.getTextureId();
+            if (tex) {
+                ImGui::Image((ImTextureID)(intptr_t)tex, vidSize);
+            } else {
+                ImVec2 vp = ImGui::GetCursorScreenPos();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(vp, ImVec2(vp.x + vidSize.x, vp.y + vidSize.y), IM_COL32(20,20,20,255), 4.0f);
+                ImGui::Dummy(vidSize);
+            }
+
+            if (!m_aboutVideoNote.empty() && ImGui::GetTime() < m_aboutVideoNoteUntil) {
+                ImGui::TextColored(ImVec4(1,0.6f,0.3f,1.0f), "%s", m_aboutVideoNote.c_str());
+            }
+
+            ImGui::PopID();
+            ImGui::EndGroup(); // end video group
+
+            ImGui::EndGroup(); // end text+video column beside image
+
+            // Update video player (upload frames to texture if available)
+            m_videoPlayer.update();
         } else {
             // If the image failed to load, show helpful message and path hints
             ImGui::TextColored(ImVec4(1.0f,0.6f,0.3f,1.0f), "About image not found.");
-            ImGui::Text("Expected one of: ../res/TheBrokenMind.png, res/TheBrokenMind.png, ./res/TheBrokenMind.png");
+            ImGui::Text("Expected one of: ../res/TheBrokenClip.png, res/TheBrokenClip.png, ./res/TheBrokenClip.png");
         }
         
         if (ImGui::Button("Close", ImVec2(120, 0))) {
+            m_videoControlsRevealed = false;
+            m_videoControlsKeyHeldSince = 0.0;
+            // Stop and close video so it's ready to play again
+            m_videoPlayer.pause();
+            m_videoPlayer.close();
+            loadAboutImage("TheBrokenMind.png");
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("License", ImVec2(120, 0))) {
             m_showLicense = true;
+            // Stop and close video so it's ready to play again
+            m_videoPlayer.pause();
+            m_videoPlayer.close();
+            loadAboutImage("TheBrokenMind.png");
+            m_videoControlsRevealed = false;
+            m_videoControlsKeyHeldSince = 0.0;
             ImGui::CloseCurrentPopup();  // Close About so License window is visible
         }
         ImGui::EndPopup();
+    } else {
+        // Popup was closed (Escape key or clicked outside) - ensure video is stopped
+        if (m_videoPlayer.isOpen()) {
+            m_videoPlayer.pause();
+            m_videoPlayer.close();
+            loadAboutImage("TheBrokenMind.png");
+            m_videoControlsRevealed = false;
+            m_videoControlsKeyHeldSince = 0.0;
+        }
     }
     
     // License window
@@ -1854,7 +2007,27 @@ void App::renderTreeViewport() {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "[Travelling Spirit]");
         }
+
+        // Top-of-viewer transient message (e.g., link failures) — anchor to the right of the spirit stats but before the controls
+        if (!m_treeMessage.empty() && std::chrono::steady_clock::now() < m_treeMessageUntil) {
+            char msgBuf[512];
+            snprintf(msgBuf, sizeof(msgBuf), "Link failed: %s", m_treeMessage.c_str());
+            float msgW = ImGui::CalcTextSize(msgBuf).x;
+            float curX = ImGui::GetCursorPosX();
+            float desiredX = controlsStartX - msgW - 8.0f; // leave small padding from controls
+            if (desiredX > curX) {
+                ImGui::SetCursorPosX(desiredX);
+            } else {
+                ImGui::SameLine();
+            }
+            ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "%s", msgBuf);
+        } else {
+            // Clear expired message
+            m_treeMessage.clear();
+        }
     }
+
+
 
     // Create mode button / Link mode / Delete confirm mode
     // Only position controls if we have a selected spirit
@@ -1879,13 +2052,59 @@ void App::renderTreeViewport() {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
             if (ImGui::Button("Yes, Krill it.", ImVec2(yesW, 0))) {
-                // Actually krill the node
+                // Prepare for delete: capture parent and children so we can reparent and relayout
+                uint64_t oldParent = 0;
+                std::vector<uint64_t> oldChildren;
+                if (!m_selectedSpirit.empty()) {
+                    SpiritNode* delNode = m_treeManager.getNode(m_selectedSpirit, m_deleteNodeId);
+                    if (delNode) {
+                        oldParent = delNode->dep;
+                        oldChildren = delNode->children;
+                    }
+                }
+
+                // Start delete animation (capture node geometry/color before removing it)
+                if (!m_selectedSpirit.empty()) {
+                    SpiritNode* delNode = m_treeManager.getNode(m_selectedSpirit, m_deleteNodeId);
+                    if (delNode) {
+                        ImU32 color = m_treeRenderer.getNodeFillColorForNode(*delNode);
+                        m_treeRenderer.startDeleteAnimation(m_deleteNodeId, delNode->x, delNode->y, color);
+                        // Quick transient message to confirm animation trigger
+
+                    }
+                }
+
+                // Actually delete the node
                 m_treeManager.deleteNode(m_selectedSpirit, m_deleteNodeId);
                 m_treeRenderer.clearFreeFloating(m_deleteNodeId);
                 // Remove from selection set if present
                 if (m_treeRenderer.isNodeSelected(m_deleteNodeId)) {
                     m_treeRenderer.removeNodeFromSelection(m_deleteNodeId);
                 }
+
+                // If the deleted node had a parent, we always relayout the subtree rooted at that parent
+                // (even if the deleted node had no children) so any remaining single child will be placed North.
+                if (oldParent != 0) {
+                    if (!oldChildren.empty()) {
+                        for (uint64_t cid : oldChildren) {
+                            SpiritNode* ch = m_treeManager.getNode(m_selectedSpirit, cid);
+                            if (ch) {
+                                ch->dep = oldParent;
+                            }
+                        }
+                    }
+
+                    // Rebuild relationships and relayout the subtree rooted at the old parent
+                    m_treeManager.rebuildTree(m_selectedSpirit);
+                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, oldParent, &shifts)) {
+                        // Apply base shifts so nodes animate smoothly into their new positions
+                        for (const auto& kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                        }
+                    }
+                }
+
                 m_deleteConfirmMode = false;
                 m_deleteNodeId = 0;
             }
@@ -1913,13 +2132,23 @@ void App::renderTreeViewport() {
             }
             ImGui::PopStyleColor(4);
         } else if (m_linkMode) {
+            // Anchor "Cancel Link" to the right edge when in link mode
+            ImVec2 winPosLocal = ImGui::GetWindowPos();
+            ImVec2 winSizeLocal = ImGui::GetWindowSize();
+            float btnPadding = style.WindowPadding.x;
+            ImVec2 textSize = ImGui::CalcTextSize("Cancel Link");
+            float btnW = textSize.x + style.FramePadding.x * 2.0f + 12.0f;
+            float x = winPosLocal.x + winSizeLocal.x - btnPadding - btnW;
+            ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.7f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
-            if (ImGui::Button("Cancel Link")) {
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.3f, 0.6f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            if (ImGui::Button("Cancel Link", ImVec2(btnW, 0))) {
                 m_linkMode = false;
                 m_linkSourceNodeId = 0;
             }
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(4);
         } else {
             // Anchor "+ Add Node" to the right edge of the control area
             ImVec2 winPosLocal = ImGui::GetWindowPos();
@@ -1963,6 +2192,17 @@ void App::renderTreeViewport() {
                                           m_linkMode, &linkTargetId, 
                                           &rightClickedNodeId, m_deleteConfirmMode, false, &m_typeColors,
                                           &dragReleasedId, &dragFinalOffset, &draggingTreeId, &dragTreeDelta);
+
+    // If the user left-clicked on the canvas (clickPos set) in normal mode and the click
+    // was on empty space (no node under the cursor), then deselect nodes.
+    if (!m_createMode && !m_linkMode && !std::isnan(clickPos.x) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec2 mouseScreen = io.MousePos;
+        uint64_t hit = m_treeRenderer.getNodeAtScreenPosition(tree, mouseScreen);
+        if (hit == TreeRenderer::NO_NODE_ID) {
+            m_treeRenderer.clearSelection();
+        }
+    }
 
     // If a drag just finished, persist the node's base offset so it remains at the dropped location
     if (dragReleasedId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
@@ -2166,8 +2406,9 @@ void App::renderTreeViewport() {
         ImGui::Separator();
         
         // Delete node - danger option with red color
+        bool canDelete = (m_treeRenderer.getSelectedNodeId() != TreeRenderer::NO_NODE_ID);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-        if (ImGui::MenuItem("Delete Node")) {
+        if (ImGui::MenuItem("Delete Node", nullptr, false, canDelete)) {
             // Enter delete confirmation mode
             m_deleteConfirmMode = true;
             m_deleteNodeId = m_contextMenuNodeId;
@@ -2193,26 +2434,39 @@ void App::renderTreeViewport() {
     // Handle link mode - link source node to target (target becomes parent)
     if (m_linkMode && clicked && linkTargetId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
         SpiritNode* sourceNode = m_treeManager.getNode(m_selectedSpirit, m_linkSourceNodeId);
-        if (sourceNode && linkTargetId != m_linkSourceNodeId) {
-            // Set the source node's dep to the target node's ID
-            sourceNode->dep = linkTargetId;
-            
-            // Clear free-floating status since it's now part of the tree
-            m_treeRenderer.clearFreeFloating(m_linkSourceNodeId);
-            
-            // Rebuild tree to update relationships
-            m_treeManager.rebuildTree(m_selectedSpirit);
-            
-            // Position the linked node according to tree layout rules and collect visual shifts
-            std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-            m_treeManager.positionLinkedNode(m_selectedSpirit, m_linkSourceNodeId, &shifts);
-            // Apply base-shift offsets so nodes animate smoothly into their new positions
-            for (const auto& kv : shifts) {
-                auto id = kv.first;
-                const auto& p = kv.second;
-                m_treeRenderer.applyBaseShift(id, p.first, p.second);
+        SpiritNode* targetNode = m_treeManager.getNode(m_selectedSpirit, linkTargetId);
+        if (sourceNode && targetNode && linkTargetId != m_linkSourceNodeId) {
+            // Disallow linking a new node to another new node; new nodes must attach to main tree nodes
+            if (sourceNode->isNew && targetNode->isNew) {
+                m_treeMessage = "cannot link new node to another new node";
+                m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+            } else {
+                // Set the source node's dep to the target node's ID
+                sourceNode->dep = linkTargetId;
+                // If a 'new' node was successfully linked to the main tree, clear its new-flag
+                if (sourceNode->isNew && !targetNode->isNew) sourceNode->isNew = false;
+                
+                // Clear free-floating status since it's now part of the tree
+                m_treeRenderer.clearFreeFloating(m_linkSourceNodeId);
+                
+                // Rebuild tree to update relationships
+                m_treeManager.rebuildTree(m_selectedSpirit);
+                
+                // Position the linked node according to tree layout rules and collect visual shifts
+                std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                m_treeManager.positionLinkedNode(m_selectedSpirit, m_linkSourceNodeId, &shifts);
+                // Apply base-shift offsets so nodes animate smoothly into their new positions
+                for (const auto& kv : shifts) {
+                    auto id = kv.first;
+                    const auto& p = kv.second;
+                    m_treeRenderer.applyBaseShift(id, p.first, p.second);
+                }
             }
+        } else {
+            m_treeMessage = "Link failed: invalid source or target";
+            m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         }
+
         
         // Exit link mode
         m_linkMode = false;
@@ -2291,14 +2545,6 @@ void App::renderNodeDetails() {
     // Track whether any attribute changed in this panel
     bool attrChanged = false;
 
-    // ID-Name match status
-    if (idMatches) {
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Id - name: Match!");
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Id - name: MISMATCH!");
-    }
-    ImGui::Separator();
-    ImGui::Spacing();
     
     // Display node attributes in JSON order: ap, cst, ctyp, dep, id, nm, spirit, typ
 
@@ -2393,6 +2639,10 @@ void App::renderNodeDetails() {
                 m_customCtypBuf[sizeof(m_customCtypBuf)-1] = '\0';
             }
         }
+        // Show 'Custom' label next to the checkbox; orange when checked
+        ImGui::SameLine();
+        if (m_ctypCustomInput) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Custom");
+        else ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Custom");
     }
 
     ImGui::Spacing();
@@ -2411,6 +2661,8 @@ void App::renderNodeDetails() {
     // Fix ID button directly to the right of the label
     if (!idMatches && showFixButton) {
         ImGui::SameLine();
+        // Nudge the button slightly upward for better vertical alignment with the label
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.18f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.75f, 0.25f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.35f, 0.08f, 1.0f));
@@ -2460,12 +2712,24 @@ void App::renderNodeDetails() {
         }
     }
 
+
+
     // Show expected ID on the next line for readability when it doesn't match
     if (!idMatches) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(expected: %u)", nodeExpectedId);
     }
+
+    // ID-Name match status (placed under ID and above Name)
+    if (idMatches) {
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Match!");
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "MISMATCH!");
+    }
+
+
+
     ImGui::Spacing();
-    
+
     // nm - Name (editable)
     ImGui::TextColored(matchColor, "Name (nm):");
 
@@ -2476,9 +2740,13 @@ void App::renderNodeDetails() {
         auto& failedSet = m_unknownNameFromLoadedFileIds[m_selectedSpirit];
         if (failedSet.find(selectedNode->id) != failedSet.end()) {
             // Show persistent red message for this node
-            ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "Unknown ID from loaded file");
+            ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "Unknown ID from file");
         } else {
+            // Nudge the button slightly upward for alignment
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.18f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.75f, 0.25f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.35f, 0.08f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
             if (ImGui::Button("Fix name by ID", ImVec2(120, ImGui::GetFrameHeight()))) {
                 std::string restored;
@@ -2492,7 +2760,7 @@ void App::renderNodeDetails() {
                     failedSet.insert(selectedNode->id);
                 }
             }
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(4);
         }
     }
 
@@ -2504,6 +2772,8 @@ void App::renderNodeDetails() {
         selectedNode->name = std::string(nameBuf);
         attrChanged = true;
     }
+
+
 
     ImGui::Spacing();
     
@@ -2659,6 +2929,10 @@ if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
                 m_customTypeBuf[sizeof(m_customTypeBuf)-1] = '\0';
             }
         }
+        // Show 'Custom' label next to the checkbox; orange when checked
+        ImGui::SameLine();
+        if (m_typeCustomInput) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Custom");
+        else ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Custom");
     }
     ImGui::Spacing();
 

@@ -1,6 +1,6 @@
 # Building a single Linux executable with embedded assets
 
-This document explains how to build a Linux binary that embeds the About image (`TheBrokenMind.png`) into the executable so it can display the About dialog without requiring the image file on disk.
+This document explains how to build a Linux binary that embeds the About image (`TheBrokenClip.png`) into the executable so it can display the About dialog without requiring the image file on disk.
 
 ## Notes about static linking on Linux
 
