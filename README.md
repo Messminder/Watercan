@@ -12,6 +12,7 @@ Currently, this software is **almost** on point for release, but you're welcome 
   * Nodes even has physics because F U N.
 * Easy to use and understandable Node attribute editor:
   * Use the scrollwheel on the Cost (cst) to quickly select numbers.
+  * FNV1a32 id and programatic name mismatch detection and automatic fix at the click of a button.
 * There is a raw JSON editor right under if you like:
   * With colorful text when you do the indicated keyboard shortcuts.
   * When selecting multiple nodes, it reflects your selections in real-time.
