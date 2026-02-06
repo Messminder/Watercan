@@ -44,8 +44,8 @@ EOF
 # Also place a copy of the .desktop file at the AppDir root (required by appimagetool)
 cp "${APPDIR}/usr/share/applications/Watercan.desktop" "${APPDIR}/Watercan.desktop" || true
 
-# Icon: use TheBrokenMind.png as the application icon (resizing not performed)
-ICON_SRC="${ROOT_DIR}/res/TheBrokenMind.png"
+# Icon: use TheBrokenClip.png as the application icon (resizing not performed)
+ICON_SRC="${ROOT_DIR}/res/TheBrokenClip.png"
 if [[ -f "${ICON_SRC}" ]]; then
   # Copy to the common size used by AppImage desktop integration
   cp "${ICON_SRC}" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/watercan.png" || true

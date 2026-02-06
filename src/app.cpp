@@ -30,7 +30,7 @@
 namespace Watercan {
 
 // Version information
-constexpr const char* WATERCAN_VERSION = "1.0.0";
+constexpr const char* WATERCAN_VERSION = "1.5.0";
 
 // Error callback for GLFW
 static void glfw_error_callback(int error, const char* description) {
@@ -1534,8 +1534,8 @@ void App::renderUI() {
             // Text beside image, left-aligned, with video below the text
             ImGui::BeginGroup();
             ImGui::Text("For use with private servers and their communities.");
-            ImGui::Text("TGC can use it too but they have to talk to me first.");
-            ImGui::Text("Desired to be under the permissive MIT license, see LICENSE for details.");
+            ImGui::Text("This release of Watercan has been given the symbolic name of 'Clippy'!");
+            ImGui::Text("Under the highly permissive MIT license, see LICENSE for details.");
 
             // Video preview below the text, still beside the image
             ImGui::Dummy(ImVec2(0.0f, 6.0f));

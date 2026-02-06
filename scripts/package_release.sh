@@ -25,7 +25,7 @@ else
 fi
 
 # Determine version from CMakeLists.txt or fallback
-VERSION="1.0.0"
+VERSION="1.5.0"
 if grep -Po "project\(.*VERSION\s+\K[0-9]+(\.[0-9]+)*" "${ROOT_DIR}/CMakeLists.txt" >/dev/null 2>&1; then
   VERSION=$(grep -Po "project\(.*VERSION\s+\K[0-9]+(\.[0-9]+)*" "${ROOT_DIR}/CMakeLists.txt" | head -n1)
 fi
