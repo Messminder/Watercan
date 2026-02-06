@@ -1,6 +1,13 @@
-# Build directory
+# Build directories
 build/
+build-*/
 cmake-build-*/
+
+# Video files (too large for git)
+*.mp4
+*.ogv
+*.avi
+*.mkv
 
 # IDE files
 .vscode/
