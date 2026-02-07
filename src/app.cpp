@@ -1992,13 +1992,20 @@ void App::renderTreeViewport() {
         }
 
         float startX = ImGui::GetCursorPosX();
+        float startY = ImGui::GetCursorPosY();
         float maxW = controlsStartX - startX - 8.0f; // leave small padding from controls
         if (maxW < 0.0f) maxW = 0.0f;
         float labelW = ImGui::CalcTextSize(spiritLabel.c_str()).x;
+
+        // Ensure the spirit label stays on a single line (truncate with ellipsis if needed)
         if (labelW > maxW && maxW > 10.0f) {
-            ImGui::PushTextWrapPos(startX + maxW);
-            ImGui::TextUnformatted(spiritLabel.c_str());
-            ImGui::PopTextWrapPos();
+            std::string truncated = spiritLabel;
+            // Reserve 3 chars for ellipsis
+            while (!truncated.empty() && ImGui::CalcTextSize((truncated + "...").c_str()).x > maxW) {
+                truncated.pop_back();
+            }
+            truncated += "...";
+            ImGui::TextUnformatted(truncated.c_str());
         } else {
             ImGui::TextUnformatted(spiritLabel.c_str());
         }
@@ -2008,18 +2015,22 @@ void App::renderTreeViewport() {
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "[Travelling Spirit]");
         }
 
-        // Top-of-viewer transient message (e.g., link failures) — anchor to the right of the spirit stats but before the controls
+        // Top-of-viewer transient message (e.g., link failures) — place it on the same baseline as the spirit stats
         if (!m_treeMessage.empty() && std::chrono::steady_clock::now() < m_treeMessageUntil) {
             char msgBuf[512];
             snprintf(msgBuf, sizeof(msgBuf), "Link failed: %s", m_treeMessage.c_str());
             float msgW = ImGui::CalcTextSize(msgBuf).x;
-            float curX = ImGui::GetCursorPosX();
             float desiredX = controlsStartX - msgW - 8.0f; // leave small padding from controls
-            if (desiredX > curX) {
+
+            // Start on the same line as the spirit label
+            ImGui::SameLine();
+            // If we have enough room to push it to the right, set X; otherwise leave it after the label
+            float curX = ImGui::GetCursorPosX();
+            if (desiredX > curX + 4.0f) {
                 ImGui::SetCursorPosX(desiredX);
-            } else {
-                ImGui::SameLine();
             }
+            // Make sure the message is aligned to the same baseline as the spirit label
+            ImGui::SetCursorPosY(startY);
             ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "%s", msgBuf);
         } else {
             // Clear expired message
