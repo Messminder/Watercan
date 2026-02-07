@@ -289,14 +289,33 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             uint64_t rightClickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
             if (rightClickedNode != NO_NODE_ID && outRightClickedNodeId) {
                 *outRightClickedNodeId = rightClickedNode;
-                // Select behavior: respect SHIFT to multi-select
-                bool shift = io.KeyShift;
-                if (shift) {
-                    if (isNodeSelected(rightClickedNode)) removeNodeFromSelection(rightClickedNode);
-                    else addNodeToSelection(rightClickedNode);
+                // When external highlighted nodes exist (reorder mode), only allow selecting highlighted nodes
+                if (!m_highlightedNodes.empty()) {
+                    if (m_highlightedNodes.count(rightClickedNode) == 0) {
+                        // don't change selection, but still report right-click so context menu can be shown
+                        actionOccurred = true;
+                        // skip selection change
+                    } else {
+                        // Select behavior: respect SHIFT to multi-select
+                        bool shift = io.KeyShift;
+                        if (shift) {
+                            if (isNodeSelected(rightClickedNode)) removeNodeFromSelection(rightClickedNode);
+                            else addNodeToSelection(rightClickedNode);
+                        } else {
+                            clearSelection();
+                            addNodeToSelection(rightClickedNode);
+                        }
+                    }
                 } else {
-                    clearSelection();
-                    addNodeToSelection(rightClickedNode);
+                    // Normal select behavior when no highlight restriction
+                    bool shift = io.KeyShift;
+                    if (shift) {
+                        if (isNodeSelected(rightClickedNode)) removeNodeFromSelection(rightClickedNode);
+                        else addNodeToSelection(rightClickedNode);
+                    } else {
+                        clearSelection();
+                        addNodeToSelection(rightClickedNode);
+                    }
                 }
             } else {
                 // Right-clicked empty space: report click position in world coordinates so the app can show a context menu
@@ -345,7 +364,24 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImVec2 mousePos = io.MousePos;
                 uint64_t clickedNode = getNodeAtPosition(tree, mousePos, origin, m_zoom);
-                if (clickedNode != NO_NODE_ID) {
+
+                // Special case: when selection restriction is active (reorder mode), only allow selection of selectable nodes
+                if (!m_selectableNodes.empty()) {
+                    // Convert click to world coords for external handlers
+                    float worldX = (mousePos.x - origin.x) / m_zoom;
+                    float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
+                    if (outClickPos) { outClickPos->x = worldX; outClickPos->y = worldY; }
+
+                    if (clickedNode != NO_NODE_ID && m_selectableNodes.count(clickedNode) > 0) {
+                        // Single-select the clicked allowed leaf and do not enter drag mode
+                        clearSelection();
+                        addNodeToSelection(clickedNode);
+                        actionOccurred = true;
+                    } else {
+                        // Ignore clicks on non-selectable nodes (no selection change)
+                        actionOccurred = true;
+                    }
+                } else if (clickedNode != NO_NODE_ID) {
                     // Check for multi-select (SHIFT held)
                     ImGuiIO& ioLocal = ImGui::GetIO();
                     bool shift = ioLocal.KeyShift;
@@ -668,6 +704,8 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
             drawList->AddPolyline(pts.data(), (int)pts.size(), applyAlpha(IM_COL32(60,60,60,255), a.alpha), false, 1.5f);
             drawList->AddLine(ImVec2(a.leftPos.x + a.radius * m_zoom * 0.2f, a.leftPos.y), ImVec2(a.rightPos.x - a.radius * m_zoom * 0.2f, a.rightPos.y), applyAlpha(IM_COL32(40,40,40,255), a.alpha), 1.0f);
 
+
+
             if (elapsed >= a.lifetime) {
                 toErase.push_back(id);
             }
@@ -779,6 +817,9 @@ void TreeRenderer::startDeleteAnimation(uint64_t nodeId, float worldX, float wor
 
     DeleteAnim a;
     a.radius = NODE_RADIUS;
+    // Record the screen-space center so slice effect remains anchored
+
+
     // Keep small separation; focus on speed rather than drama
     float sep = a.radius * 0.12f * m_zoom;
     a.leftPos = ImVec2(center.x - sep, center.y);
@@ -801,10 +842,32 @@ void TreeRenderer::startDeleteAnimation(uint64_t nodeId, float worldX, float wor
     m_deleteAnims[nodeId] = a;
 }
 
+bool TreeRenderer::getNodeScreenPosition(const SpiritTree* tree, uint64_t nodeId, ImVec2* outPos) const {
+    if (!tree || !outPos) return false;
+    // Build id->node map
+    std::unordered_map<uint64_t, const SpiritNode*> idToNode;
+    for (const auto &n : tree->nodes) idToNode[n.id] = &n;
+    auto it = idToNode.find(nodeId);
+    if (it == idToNode.end()) return false;
+    const SpiritNode* node = it->second;
+    ImVec2 origin;
+    origin.x = m_lastCanvasPos.x + m_lastCanvasSize.x * 0.5f + m_pan.x * m_zoom;
+    origin.y = m_lastCanvasPos.y + m_lastCanvasSize.y * 0.75f + m_pan.y * m_zoom;
+    ImVec2 screenPos;
+    screenPos.x = origin.x + node->x * m_zoom;
+    screenPos.y = origin.y - node->y * m_zoom;
+    *outPos = screenPos;
+    return true;
+}
+
 void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node, 
                             ImVec2 origin, float zoom, bool isSelected) {
     // Get node offset from dragging
     ImVec2 offset = getNodeOffset(node.id);
+
+    // If this node is externally highlighted, draw a subtle halo to emphasize it
+    bool externallyHighlighted = (m_highlightedNodes.count(node.id) > 0);
+
     
     // Convert node position to screen position (with offset applied)
     // Note: y is inverted (positive y goes up in logic, but down on screen)
@@ -817,6 +880,12 @@ void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node,
     // Check for ID mismatch
     uint32_t expectedId = fnv1a32(node.name);
     bool idMismatch = (node.id != expectedId);
+
+    if (externallyHighlighted) {
+        // Draw a soft highlight ring behind the node
+        ImU32 halo = IM_COL32(255, 220, 80, 64);
+        drawList->AddCircleFilled(screenPos, radius * 1.15f, halo);
+    }
     
     // Get colors
     ImU32 fillColor = getNodeColor(node);
@@ -958,8 +1027,10 @@ void TreeRenderer::drawConnection(ImDrawList* drawList, const SpiritNode& parent
     float nx = dx / dist;
     float ny = dy / dist;
     
-    ImVec2 start(parentPos.x + nx * radius, parentPos.y + ny * radius);
-    ImVec2 end(childPos.x - nx * radius, childPos.y - ny * radius);
+    // Inset connections slightly so lines don't visually touch node edges
+    float connectionInset = 12.0f * zoom; // increased inset for clearer separation
+    ImVec2 start(parentPos.x + nx * (radius + connectionInset), parentPos.y + ny * (radius + connectionInset));
+    ImVec2 end(childPos.x - nx * (radius + connectionInset), childPos.y - ny * (radius + connectionInset));
     
     // Calculate the "tension" based on how far nodes are from their original positions
     float parentOffsetDist = sqrtf(parentOffset.x * parentOffset.x + parentOffset.y * parentOffset.y);
@@ -1039,29 +1110,58 @@ void TreeRenderer::drawConnection(ImDrawList* drawList, const SpiritNode& parent
 
     // Thickness can increase slightly when stretched
     float thickness = CONNECTION_THICKNESS * zoom * (1.0f + 0.5f * tensionFactor);
-    
-    drawList->AddBezierCubic(start, ctrl1, ctrl2, end, lineColor, thickness);
-    
-    // Draw arrowhead pointing toward the child node
+
+    // Draw a single straight line between the inset start and the arrow base (so the arrow tip can touch the node edge)
     float arrowSize = 8.0f * zoom;
-    
-    // Use the straight-line direction from parent to child for consistent arrow orientation
-    // This looks cleaner than using the bezier tangent which can be at odd angles
-    float arrowDirX = nx;  // Already normalized direction from parent to child
-    float arrowDirY = ny;
-    
-    // Perpendicular vector for arrow wings
-    float perpX = -arrowDirY;
-    float perpY = arrowDirX;
-    
-    // Arrow tip is at 'end', wings are behind
-    ImVec2 arrowTip = end;
-    ImVec2 arrowLeft(end.x - arrowDirX * arrowSize + perpX * arrowSize * 0.5f,
-                     end.y - arrowDirY * arrowSize + perpY * arrowSize * 0.5f);
-    ImVec2 arrowRight(end.x - arrowDirX * arrowSize - perpX * arrowSize * 0.5f,
-                      end.y - arrowDirY * arrowSize - perpY * arrowSize * 0.5f);
-    
-    drawList->AddTriangleFilled(arrowTip, arrowLeft, arrowRight, lineColor);
+
+    // Compute arrow tip at the child node edge (so the arrow 'sticks' to the node)
+    ImVec2 arrowTip = ImVec2(childPos.x - nx * radius, childPos.y - ny * radius);
+    // Place arrow base a bit behind the tip so the arrow points cleanly at the node
+    ImVec2 arrowBase = ImVec2(arrowTip.x - nx * (arrowSize * 0.6f), arrowTip.y - ny * (arrowSize * 0.6f));
+
+    if (m_showArrows) {
+        // Leave a small hover gap between the visible line end and the arrow base
+        float hoverGap = 6.0f * zoom;
+        ImVec2 lineEnd = ImVec2(arrowBase.x - nx * hoverGap, arrowBase.y - ny * hoverGap);
+
+        // If the computed end would be before the start point, clamp to a tiny segment
+        float dxLine = lineEnd.x - start.x;
+        float dyLine = lineEnd.y - start.y;
+        float lineLen = sqrtf(dxLine*dxLine + dyLine*dyLine);
+        if (lineLen < 1.0f) {
+            ImVec2 tinyEnd = ImVec2(start.x + nx * 1.0f, start.y + ny * 1.0f);
+            drawList->AddLine(start, tinyEnd, lineColor, thickness);
+        } else {
+            drawList->AddLine(start, lineEnd, lineColor, thickness);
+        }
+
+        // Use the straight-line direction from parent to child for consistent arrow orientation
+        float arrowDirX = nx;  // Already normalized direction from parent to child
+        float arrowDirY = ny;
+        // Perpendicular vector for arrow wings
+        float perpX = -arrowDirY;
+        float perpY = arrowDirX;
+
+        // Compute arrow wings around the tip
+        ImVec2 arrowLeft(arrowTip.x - arrowDirX * arrowSize + perpX * arrowSize * 0.5f,
+                         arrowTip.y - arrowDirY * arrowSize + perpY * arrowSize * 0.5f);
+        ImVec2 arrowRight(arrowTip.x - arrowDirX * arrowSize - perpX * arrowSize * 0.5f,
+                          arrowTip.y - arrowDirY * arrowSize - perpY * arrowSize * 0.5f);
+
+        drawList->AddTriangleFilled(arrowTip, arrowLeft, arrowRight, lineColor);
+    } else {
+        // No arrows: draw line all the way to the inset endpoint so it sits close to nodes
+        ImVec2 lineEnd = end;
+        float dxLine = lineEnd.x - start.x;
+        float dyLine = lineEnd.y - start.y;
+        float lineLen = sqrtf(dxLine*dxLine + dyLine*dyLine);
+        if (lineLen < 1.0f) {
+            ImVec2 tinyEnd = ImVec2(start.x + nx * 1.0f, start.y + ny * 1.0f);
+            drawList->AddLine(start, tinyEnd, lineColor, thickness);
+        } else {
+            drawList->AddLine(start, lineEnd, lineColor, thickness);
+        }
+    }
 }
 
 ImU32 TreeRenderer::getNodeColor(const SpiritNode& node) const {
@@ -1091,6 +1191,11 @@ ImU32 TreeRenderer::getNodeColor(const SpiritNode& node) const {
 }
 
 ImU32 TreeRenderer::getNodeBorderColor(const SpiritNode& node) const {
+    // If this node has been externally highlighted (e.g., reorder mode), show a yellow border
+    if (m_highlightedNodes.count(node.id) > 0) {
+        return IM_COL32(255, 220, 80, 255);
+    }
+
     // If a render-time per-type color map is provided, prefer a darker border variant
     if (m_currentRenderTypeColors) {
         auto it = m_currentRenderTypeColors->find(node.type);

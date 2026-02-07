@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # Workaround for older CMake min versions in dependencies
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "")
 
-project(Watercan VERSION 1.5.0 LANGUAGES CXX C)
+project(Watercan VERSION 1.5.7 LANGUAGES CXX C)
 
 # Build option: attempt a single-binary build by preferring static libs where possible.
 # This is a best-effort option: OpenGL (libGL) will remain dynamic to preserve compatibility.

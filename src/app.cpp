@@ -30,7 +30,7 @@
 namespace Watercan {
 
 // Version information
-constexpr const char* WATERCAN_VERSION = "1.5.0";
+constexpr const char* WATERCAN_VERSION = "1.5.7";
 
 // Error callback for GLFW
 static void glfw_error_callback(int error, const char* description) {
@@ -2018,7 +2018,7 @@ void App::renderTreeViewport() {
         // Top-of-viewer transient message (e.g., link failures) — place it on the same baseline as the spirit stats
         if (!m_treeMessage.empty() && std::chrono::steady_clock::now() < m_treeMessageUntil) {
             char msgBuf[512];
-            snprintf(msgBuf, sizeof(msgBuf), "Link failed: %s", m_treeMessage.c_str());
+            snprintf(msgBuf, sizeof(msgBuf), "ERROR: %s", m_treeMessage.c_str());
             float msgW = ImGui::CalcTextSize(msgBuf).x;
             float desiredX = controlsStartX - msgW - 8.0f; // leave small padding from controls
 
@@ -2142,6 +2142,141 @@ void App::renderTreeViewport() {
                 m_createMode = false;
             }
             ImGui::PopStyleColor(4);
+        } else if (m_reorderMode) {
+            // Anchor "Cancel" to the right edge to match other modes
+            ImVec2 winPosLocal = ImGui::GetWindowPos();
+            ImVec2 winSizeLocal = ImGui::GetWindowSize();
+            float btnPadding = style.WindowPadding.x;
+            ImVec2 textSize = ImGui::CalcTextSize("Cancel");
+            float btnW_local = textSize.x + style.FramePadding.x * 2.0f + 12.0f;
+            float x_local = winPosLocal.x + winSizeLocal.x - btnPadding - btnW_local;
+            ImGui::SetCursorScreenPos(ImVec2(x_local, ImGui::GetCursorScreenPos().y));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.7f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.6f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+            if (ImGui::Button("Cancel", ImVec2(btnW_local, 0))) {
+                m_reorderMode = false;
+                m_reorderNodeId = TreeRenderer::NO_NODE_ID;
+                m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID;
+                m_treeRenderer.clearHighlightedNodes();
+                m_treeRenderer.clearSelectableNodes();
+            }
+            ImGui::PopStyleColor(4);
+
+            // If a leaf has been selected, show NW/N/NE buttons inside an overlay window anchored to the viewport's top-right
+            if (m_reorderSelectedLeafId != TreeRenderer::NO_NODE_ID) {
+                ImVec2 winPosLocal2 = ImGui::GetWindowPos();
+                ImVec2 winSizeLocal2 = ImGui::GetWindowSize();
+                float btnPadding2 = style.WindowPadding.x;
+                ImVec2 textSizeNW = ImGui::CalcTextSize("NW");
+                float btnW2 = textSizeNW.x + style.FramePadding.x * 2.0f + 12.0f;
+                float gap = 8.0f;
+                float totalW = btnW2 * 3 + gap * 2;
+                float startX = winPosLocal2.x + winSizeLocal2.x - btnPadding2 - totalW;
+                float y = winPosLocal2.y + btnPadding2; // anchor to top-right inside viewport
+
+                // Create a small overlay window so the buttons don't affect layout
+                ImGui::SetNextWindowPos(ImVec2(startX, y), ImGuiCond_Always);
+                ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize;
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+                if (ImGui::Begin("##ReorderButtons", nullptr, flags)) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.85f, 0.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.7f, 0.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+
+                    if (ImGui::Button("NW", ImVec2(btnW2, 0))) {
+                        // Reparent selected leaf to m_reorderNodeId as NW (insert at index 0)
+                        if (!m_selectedSpirit.empty()) {
+                            SpiritNode* leaf = m_treeManager.getNode(m_selectedSpirit, m_reorderSelectedLeafId);
+                            if (leaf) {
+                                leaf->dep = m_reorderNodeId;
+                                m_treeManager.rebuildTree(m_selectedSpirit);
+                                SpiritNode* parent = m_treeManager.getNode(m_selectedSpirit, m_reorderNodeId);
+                                if (parent) {
+                                    // Ensure leaf is first child
+                                    parent->children.erase(std::remove(parent->children.begin(), parent->children.end(), m_reorderSelectedLeafId), parent->children.end());
+                                    parent->children.insert(parent->children.begin(), m_reorderSelectedLeafId);
+
+                                    // Re-layout subtree and apply shifts
+                                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, m_reorderNodeId, &shifts)) {
+                                        for (const auto& kv : shifts) m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                                    }
+                                }
+                            }
+                        }
+                        // Exit reorder mode
+                        // Suppress collision processing for a short period so nodes can settle without further pushes
+                        m_treeRenderer.suppressCollisions(2.0f);
+                        m_reorderMode = false;
+                        m_reorderNodeId = TreeRenderer::NO_NODE_ID;
+                        m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID;
+                        m_treeRenderer.clearHighlightedNodes();
+                        m_treeRenderer.clearSelectableNodes();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("N", ImVec2(btnW2, 0))) {
+                        // Reparent as N (insert at index 1)
+                        if (!m_selectedSpirit.empty()) {
+                            SpiritNode* leaf = m_treeManager.getNode(m_selectedSpirit, m_reorderSelectedLeafId);
+                            if (leaf) {
+                                leaf->dep = m_reorderNodeId;
+                                m_treeManager.rebuildTree(m_selectedSpirit);
+                                SpiritNode* parent = m_treeManager.getNode(m_selectedSpirit, m_reorderNodeId);
+                                if (parent) {
+                                    parent->children.erase(std::remove(parent->children.begin(), parent->children.end(), m_reorderSelectedLeafId), parent->children.end());
+                                    size_t idx = std::min((size_t)1, parent->children.size());
+                                    parent->children.insert(parent->children.begin() + idx, m_reorderSelectedLeafId);
+                                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, m_reorderNodeId, &shifts)) {
+                                        for (const auto& kv : shifts) m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                                    }
+                                }
+                            }
+                        }
+                        // Suppress collision processing briefly to allow nodes to settle
+                        m_treeRenderer.suppressCollisions(2.0f);
+                        m_reorderMode = false;
+                        m_reorderNodeId = TreeRenderer::NO_NODE_ID;
+                        m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID;
+                        m_treeRenderer.clearHighlightedNodes();
+                        m_treeRenderer.clearSelectableNodes();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("NE", ImVec2(btnW2, 0))) {
+                        // Reparent as NE (insert at index 2)
+                        if (!m_selectedSpirit.empty()) {
+                            SpiritNode* leaf = m_treeManager.getNode(m_selectedSpirit, m_reorderSelectedLeafId);
+                            if (leaf) {
+                                leaf->dep = m_reorderNodeId;
+                                m_treeManager.rebuildTree(m_selectedSpirit);
+                                SpiritNode* parent = m_treeManager.getNode(m_selectedSpirit, m_reorderNodeId);
+                                if (parent) {
+                                    parent->children.erase(std::remove(parent->children.begin(), parent->children.end(), m_reorderSelectedLeafId), parent->children.end());
+                                    size_t idx = std::min((size_t)2, parent->children.size());
+                                    parent->children.insert(parent->children.begin() + idx, m_reorderSelectedLeafId);
+                                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, m_reorderNodeId, &shifts)) {
+                                        for (const auto& kv : shifts) m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                                    }
+                                }
+                            }
+                        }
+                        // Suppress collision processing briefly to allow nodes to settle
+                        m_treeRenderer.suppressCollisions(2.0f);
+                        m_reorderMode = false;
+                        m_reorderNodeId = TreeRenderer::NO_NODE_ID;
+                        m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID;
+                        m_treeRenderer.clearHighlightedNodes();
+                        m_treeRenderer.clearSelectableNodes();
+                    }
+                    ImGui::PopStyleColor(4);
+                    ImGui::End();
+                    ImGui::PopStyleVar();
+                }
+            }
         } else if (m_linkMode) {
             // Anchor "Cancel Link" to the right edge when in link mode
             ImVec2 winPosLocal = ImGui::GetWindowPos();
@@ -2161,14 +2296,55 @@ void App::renderTreeViewport() {
             }
             ImGui::PopStyleColor(4);
         } else {
-            // Anchor "+ Add Node" to the right edge of the control area
+            // Anchor "+ Add Node" to the right edge of the control area and add a "* Reshape" button to its left
             ImVec2 winPosLocal = ImGui::GetWindowPos();
             ImVec2 winSizeLocal = ImGui::GetWindowSize();
             float btnPadding = style.WindowPadding.x;
-            ImVec2 textSize = ImGui::CalcTextSize("+ Add Node");
-            float addBtnW = textSize.x + style.FramePadding.x * 2.0f + 12.0f;
-            float x = winPosLocal.x + winSizeLocal.x - btnPadding - addBtnW;
-            ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
+            ImVec2 addTextSize = ImGui::CalcTextSize("+ Add Node");
+            float addBtnW = addTextSize.x + style.FramePadding.x * 2.0f + 12.0f;
+            ImVec2 reshapeTextSize = ImGui::CalcTextSize("* Reshape");
+            float reshapeBtnW = reshapeTextSize.x + style.FramePadding.x * 2.0f + 12.0f;
+            float gap = 8.0f;
+
+            // Add Node button at right edge and an "Arrows" toggle between Reshape and Add Node
+            float addX = winPosLocal.x + winSizeLocal.x - btnPadding - addBtnW;
+            float btnY = winPosLocal.y + btnPadding; // anchor to same top padding line
+
+            // Determine arrows label and width
+            bool arrowsShown = m_treeRenderer.showArrows();
+            const char* arrowsLabel = arrowsShown ? "- Arrows" : "+ Arrows";
+            ImVec2 arrowsTextSize = ImGui::CalcTextSize(arrowsLabel);
+            float arrowsBtnW = arrowsTextSize.x + style.FramePadding.x * 2.0f + 12.0f;
+
+            // Compute positions: addX, arrowsX, reshapeX
+            float arrowsX = addX - gap - arrowsBtnW;
+            float reshapeX = arrowsX - gap - reshapeBtnW;
+
+            // Reshape button (left of arrows)
+            ImGui::SetCursorScreenPos(ImVec2(reshapeX, btnY));
+            bool canReshape = false;
+            if (!m_selectedSpirit.empty()) canReshape = m_treeManager.needsReshape(m_selectedSpirit);
+            ImGui::BeginDisabled(!canReshape);
+            if (ImGui::Button("* Reshape", ImVec2(reshapeBtnW, 0))) {
+                // Recompute layout and animate nodes back to their computed positions
+                std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
+                    for (const auto& kv : shifts) {
+                        m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                    }
+                    m_treeRenderer.suppressCollisions(2.0f);
+                }
+            }
+            ImGui::EndDisabled();
+
+            // Arrows toggle (default colors)
+            ImGui::SetCursorScreenPos(ImVec2(arrowsX, btnY));
+            if (ImGui::Button(arrowsLabel, ImVec2(arrowsBtnW, 0))) {
+                m_treeRenderer.toggleShowArrows();
+            }
+
+            // Add Node button at right edge
+            ImGui::SetCursorScreenPos(ImVec2(addX, btnY));
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.8f, 0.0f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.9f, 0.0f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.7f, 0.0f, 1.0f));
@@ -2188,7 +2364,24 @@ void App::renderTreeViewport() {
     if (!m_selectedSpirit.empty()) {
         tree = m_treeManager.getTree(m_selectedSpirit);
     }
-    
+
+    // Reorder mode: highlight all direct children of the reorder node and draw yellow border
+    if (m_reorderMode && !m_selectedSpirit.empty()) {
+        std::unordered_set<uint64_t> leaves;
+        if (tree) {
+            std::unordered_map<uint64_t, const SpiritNode*> idToNode;
+            for (const auto& n : tree->nodes) idToNode[n.id] = &n;
+            auto pit = idToNode.find(m_reorderNodeId);
+            if (pit != idToNode.end()) {
+                for (uint64_t cid : pit->second->children)
+                    leaves.insert(cid);
+            }
+        }
+        m_treeRenderer.setHighlightedNodes(leaves);
+        m_treeRenderer.setSelectableNodes(leaves);
+
+        // Renderer will draw the canvas-level yellow border; avoid drawing a full-window border here.
+    }
     ImVec2 clickPos;
     clickPos.x = std::numeric_limits<float>::quiet_NaN(); // sentinel: set by renderer when canvas click occurs
     uint64_t linkTargetId = TreeRenderer::NO_NODE_ID;
@@ -2206,12 +2399,40 @@ void App::renderTreeViewport() {
 
     // If the user left-clicked on the canvas (clickPos set) in normal mode and the click
     // was on empty space (no node under the cursor), then deselect nodes.
-    if (!m_createMode && !m_linkMode && !std::isnan(clickPos.x) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (!m_createMode && !m_linkMode && !m_reorderMode && !std::isnan(clickPos.x) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ImGuiIO& io = ImGui::GetIO();
         ImVec2 mouseScreen = io.MousePos;
         uint64_t hit = m_treeRenderer.getNodeAtScreenPosition(tree, mouseScreen);
         if (hit == TreeRenderer::NO_NODE_ID) {
             m_treeRenderer.clearSelection();
+        }
+    }
+
+    // When in reorder mode, user clicks should select highlighted leaves only
+    if (m_reorderMode && !std::isnan(clickPos.x) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec2 mouseScreen = io.MousePos;
+        uint64_t hit = m_treeRenderer.getNodeAtScreenPosition(tree, mouseScreen);
+        if (hit != TreeRenderer::NO_NODE_ID) {
+            // Recompute the reorder node's direct children
+            std::unordered_set<uint64_t> leaves;
+            if (tree) {
+                std::unordered_map<uint64_t, const SpiritNode*> idToNode;
+                for (const auto& n : tree->nodes) idToNode[n.id] = &n;
+                auto pit = idToNode.find(m_reorderNodeId);
+                if (pit != idToNode.end()) {
+                    for (uint64_t cid : pit->second->children)
+                        leaves.insert(cid);
+                }
+            }
+            if (leaves.count(hit) > 0) {
+                m_reorderSelectedLeafId = hit;
+                // Reflect selection visibly in the tree
+                m_treeRenderer.setSelectedNodeId(hit);
+            } else {
+                m_treeMessage = "Select a highlighted leaf node to reorder";
+                m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            }
         }
     }
 
@@ -2223,16 +2444,15 @@ void App::renderTreeViewport() {
         }
     }
 
-    // Continuous tree-drag: move only the dragged node; recompute local layout and
-    // collect per-node shifts so the rest of the tree smoothly animates into place.
+    // Continuous tree-drag: move only the dragged node's subtree so each subtree
+    // behaves as an independent unit. Descendants follow with distance-based falloff;
+    // ancestor / sibling nodes stay fixed.
     if (draggingTreeId != TreeRenderer::NO_NODE_ID && !m_selectedSpirit.empty()) {
-        // Move the entire tree so the dragged node remains under the cursor, then apply
-        // scaled base shifts per node using graph distance so nodes near the dragged
-        // node follow more closely and distant nodes lag (produces a smooth deformation).
-        if (m_treeManager.moveTreeBase(m_selectedSpirit, dragTreeDelta.x, dragTreeDelta.y)) {
+        std::unordered_set<uint64_t> movedIds;
+        if (m_treeManager.moveSubtreeBase(m_selectedSpirit, draggingTreeId, dragTreeDelta.x, dragTreeDelta.y, &movedIds)) {
             const SpiritTree* treePtr = m_treeManager.getTree(m_selectedSpirit);
             if (treePtr) {
-                // Build id->node map and BFS to compute graph distances from dragged node
+                // BFS *downward only* from dragged node to compute graph distances within the subtree
                 std::unordered_map<uint64_t, const SpiritNode*> idToNode;
                 for (const auto &n : treePtr->nodes) idToNode[n.id] = &n;
 
@@ -2244,14 +2464,8 @@ void App::renderTreeViewport() {
                     uint64_t cur = q.front(); q.pop_front();
                     auto it = idToNode.find(cur);
                     if (it == idToNode.end()) continue;
-                    const SpiritNode* node = it->second;
-                    // neighbours: parent
-                    if (node->dep != 0 && dist.find(node->dep) == dist.end()) {
-                        dist[node->dep] = dist[cur] + 1;
-                        q.push_back(node->dep);
-                    }
-                    // children
-                    for (uint64_t c : node->children) {
+                    // Only traverse children (descendants), not parent
+                    for (uint64_t c : it->second->children) {
                         if (dist.find(c) == dist.end()) {
                             dist[c] = dist[cur] + 1;
                             q.push_back(c);
@@ -2259,17 +2473,16 @@ void App::renderTreeViewport() {
                     }
                 }
 
-                // Tunable: how many graph steps to fade the follow effect across
+                // Apply distance-based falloff within the moved subtree
                 const float falloffDepth = 3.0f;
-                for (const auto &n : treePtr->nodes) {
-                    int d = 9999;
-                    auto itd = dist.find(n.id);
+                for (uint64_t id : movedIds) {
+                    int d = 0;
+                    auto itd = dist.find(id);
                     if (itd != dist.end()) d = itd->second;
                     float factor = std::min(1.0f, (float)d / falloffDepth); // 0 => full move, 1 => no immediate move
                     float sx = -factor * dragTreeDelta.x;
                     float sy = -factor * dragTreeDelta.y;
-                    // Apply per-node base-shift to animate towards the new layout
-                    m_treeRenderer.applyBaseShift(n.id, sx, sy);
+                    m_treeRenderer.applyBaseShift(id, sx, sy);
                 }
             }
         }
@@ -2413,6 +2626,41 @@ void App::renderTreeViewport() {
                 m_treeManager.rebuildTree(m_selectedSpirit);
             }
         }
+
+        // Reorder option - enter reorder mode for this node to reparent leaves
+        bool canReorder = false;
+        if (canLink) {
+            const auto& sel = m_treeRenderer.getSelectedNodeIds();
+            if (sel.size() == 1 && m_treeRenderer.getSelectedNodeId() == m_contextMenuNodeId) canReorder = true;
+        }
+        // If the context node has no children, disable reorder
+        if (canReorder && !m_selectedSpirit.empty()) {
+            const SpiritNode* ctx = m_treeManager.getNode(m_selectedSpirit, m_contextMenuNodeId);
+            if (!ctx || ctx->children.empty()) canReorder = false;
+        }
+        if (ImGui::MenuItem("Reorder", nullptr, false, canReorder)) {
+            // Enter reorder mode for the context node
+            m_reorderMode = true;
+            m_reorderNodeId = m_contextMenuNodeId;
+            m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID;
+            // Ensure other modes are off
+            m_linkMode = false; m_createMode = false; m_deleteConfirmMode = false;
+
+            // Compute the reorder node's direct children only
+            std::unordered_set<uint64_t> leaves;
+            const SpiritTree* tree = m_treeManager.getTree(m_selectedSpirit);
+            if (tree) {
+                std::unordered_map<uint64_t, const SpiritNode*> idToNode;
+                for (const auto& n : tree->nodes) idToNode[n.id] = &n;
+                auto pit = idToNode.find(m_reorderNodeId);
+                if (pit != idToNode.end()) {
+                    for (uint64_t cid : pit->second->children)
+                        leaves.insert(cid);
+                }
+            }
+            m_treeRenderer.setHighlightedNodes(leaves);
+            m_treeRenderer.setSelectableNodes(leaves);
+        }
         
         ImGui::Separator();
         
@@ -2449,7 +2697,7 @@ void App::renderTreeViewport() {
         if (sourceNode && targetNode && linkTargetId != m_linkSourceNodeId) {
             // Disallow linking a new node to another new node; new nodes must attach to main tree nodes
             if (sourceNode->isNew && targetNode->isNew) {
-                m_treeMessage = "cannot link new node to another new node";
+                m_treeMessage = "Link to main tree or subtree.";
                 m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(4);
             } else {
                 // Set the source node's dep to the target node's ID
@@ -2463,15 +2711,17 @@ void App::renderTreeViewport() {
                 // Rebuild tree to update relationships
                 m_treeManager.rebuildTree(m_selectedSpirit);
                 
-                // Position the linked node according to tree layout rules and collect visual shifts
+                // Re-layout the entire subtree rooted at the new parent so the linked
+                // node AND all its descendants move together (same as Reorder mode)
                 std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-                m_treeManager.positionLinkedNode(m_selectedSpirit, m_linkSourceNodeId, &shifts);
+                m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, linkTargetId, &shifts);
                 // Apply base-shift offsets so nodes animate smoothly into their new positions
                 for (const auto& kv : shifts) {
                     auto id = kv.first;
                     const auto& p = kv.second;
                     m_treeRenderer.applyBaseShift(id, p.first, p.second);
                 }
+                m_treeRenderer.suppressCollisions(2.0f);
             }
         } else {
             m_treeMessage = "Link failed: invalid source or target";
@@ -2790,6 +3040,7 @@ void App::renderNodeDetails() {
     
     // spirit - Spirit (dropdown from known spirits)
     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Spirit (spirit):");
+
     std::vector<std::string> allSpirits = m_treeManager.getSpiritNames();
     const auto& guides = m_treeManager.getGuideNames();
     allSpirits.insert(allSpirits.end(), guides.begin(), guides.end());
@@ -2873,13 +3124,13 @@ void App::renderNodeDetails() {
         }
     }
 
-// Small toggle button to enable search (shows "Search")
-if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
-            ImGui::SameLine();
-            if (ImGui::Button("Search##spirit_toggle_btn", ImVec2(60, 0))) {
-                m_spiritCustomInput = true;
-                strncpy(m_customSpiritBuf, selectedNode->spirit.c_str(), sizeof(m_customSpiritBuf));
-                m_customSpiritBuf[sizeof(m_customSpiritBuf)-1] = '\0';
+    // Small toggle button to enable search (shows "Search")
+    if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
+        ImGui::SameLine();
+        if (ImGui::Button("Search##spirit_toggle_btn", ImVec2(60, 0))) {
+            m_spiritCustomInput = true;
+            strncpy(m_customSpiritBuf, selectedNode->spirit.c_str(), sizeof(m_customSpiritBuf));
+            m_customSpiritBuf[sizeof(m_customSpiritBuf)-1] = '\0';
         }
     }
 
@@ -2887,6 +3138,7 @@ if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
     
     // typ - Type (dropdown from known types)
     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Type (typ):");
+
     // Collect known types: union of currently loaded trees and historically known types
     std::vector<std::string> types;
     // Add known types seen previously
@@ -2914,7 +3166,6 @@ if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
             // Remember this custom type for future edits
             if (!selectedNode->type.empty()) addKnownType(selectedNode->type);
         }
-        ImGui::SameLine();
     } else {
         if (ImGui::BeginCombo("##typ", selectedNode->type.c_str())) {
             for (size_t i = 0; i < types.size(); ++i) {
@@ -2927,9 +3178,9 @@ if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
             }
             ImGui::EndCombo();
         }
-        ImGui::SameLine();
     }
 
+    ImGui::SameLine();
     // Toggle (no text) to switch type into free text input (always visible)
     {
         bool newToggle = m_typeCustomInput;
@@ -2945,6 +3196,7 @@ if (!m_spiritCustomInput && !suppressSearchButtonThisFrame) {
         if (m_typeCustomInput) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Custom");
         else ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Custom");
     }
+
     ImGui::Spacing();
 
     // If any attribute changed above, sync it to the JSON editor buffer so changes appear in real-time

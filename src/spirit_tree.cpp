@@ -614,12 +614,108 @@ bool SpiritTreeManager::moveTreeBase(const std::string& spiritName, float dx, fl
 }
 
 
+bool SpiritTreeManager::moveSubtreeBase(const std::string& spiritName, uint64_t subtreeRootId, float dx, float dy,
+                                         std::unordered_set<uint64_t>* outMovedIds) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    SpiritTree& tree = it->second;
+    if (dx == 0.0f && dy == 0.0f) return true;
 
+    // Build id->node map
+    std::unordered_map<uint64_t, SpiritNode*> idToNode;
+    for (auto& n : tree.nodes) idToNode[n.id] = &n;
 
+    // Collect subtree via DFS
+    std::unordered_set<uint64_t> subtree;
+    std::vector<uint64_t> stack;
+    stack.push_back(subtreeRootId);
+    while (!stack.empty()) {
+        uint64_t cur = stack.back(); stack.pop_back();
+        if (subtree.count(cur)) continue;
+        subtree.insert(cur);
+        auto itn = idToNode.find(cur);
+        if (itn == idToNode.end()) continue;
+        for (uint64_t c : itn->second->children) stack.push_back(c);
+    }
 
+    // Move only subtree nodes
+    for (uint64_t id : subtree) {
+        auto itn = idToNode.find(id);
+        if (itn == idToNode.end()) continue;
+        itn->second->x += dx;
+        itn->second->y += dy;
+    }
 
+    // Recompute bounds for the whole tree
+    tree.minX = std::numeric_limits<float>::infinity();
+    tree.maxX = -std::numeric_limits<float>::infinity();
+    tree.minY = std::numeric_limits<float>::infinity();
+    tree.maxY = -std::numeric_limits<float>::infinity();
+    for (const auto& n : tree.nodes) {
+        tree.minX = std::min(tree.minX, n.x);
+        tree.maxX = std::max(tree.maxX, n.x);
+        tree.minY = std::min(tree.minY, n.y);
+        tree.maxY = std::max(tree.maxY, n.y);
+    }
+    tree.width = tree.maxX - tree.minX;
+    tree.height = tree.maxY - tree.minY;
 
+    if (outMovedIds) *outMovedIds = std::move(subtree);
+    return true;
+}
 
+bool SpiritTreeManager::reshapeTreeAndCollectShifts(const std::string& spiritName,
+                                                     std::unordered_map<uint64_t, std::pair<float,float>>* outShifts) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    SpiritTree& tree = it->second;
+
+    std::unordered_map<uint64_t, std::pair<float,float>> mergedShifts;
+    // Find root nodes (dep == 0)
+    for (const auto& n : tree.nodes) {
+        if (n.dep == 0) {
+            std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+            if (layoutSubtreeAndCollectShifts(spiritName, n.id, &shifts)) {
+                for (const auto& kv : shifts) mergedShifts[kv.first] = kv.second;
+            }
+        }
+    }
+
+    if (outShifts) *outShifts = std::move(mergedShifts);
+    return true;
+}
+
+bool SpiritTreeManager::needsReshape(const std::string& spiritName, float epsilon) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    const SpiritTree& tree = it->second;
+
+    // Make a copy and recompute positions using layoutSubtree on each root without mutating the real tree
+    SpiritTree tmp = tree;
+    // Build id map for tmp and find roots
+    std::unordered_map<uint64_t, SpiritNode*> idToNode;
+    for (auto& n : tmp.nodes) idToNode[n.id] = &n;
+    for (auto& n : tmp.nodes) {
+        if (n.dep == 0) {
+            // find the node in tmp by id and call layoutSubtree on it
+            SpiritNode* root = idToNode[n.id];
+            if (root) layoutSubtree(tmp, *root, root->x, root->y, 0);
+        }
+    }
+
+    // Compare positions
+    std::unordered_map<uint64_t, const SpiritNode*> origMap;
+    for (const auto& n : tree.nodes) origMap[n.id] = &n;
+    for (const auto& n : tmp.nodes) {
+        auto itn = origMap.find(n.id);
+        if (itn == origMap.end()) continue;
+        const SpiritNode* orig = itn->second;
+        float dx = fabsf(orig->x - n.x);
+        float dy = fabsf(orig->y - n.y);
+        if (dx > epsilon || dy > epsilon) return true;
+    }
+    return false;
+}
 
 void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64_t nodeId,
                                              std::unordered_map<uint64_t, std::pair<float,float>>* outShifts) {

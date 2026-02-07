@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 
 namespace Watercan {
@@ -110,6 +111,15 @@ public:
     bool layoutSubtreeAndCollectShifts(const std::string& spiritName, uint64_t rootNodeId,
                                        std::unordered_map<uint64_t, std::pair<float,float>>* outShifts = nullptr);
 
+    // Recompute the computed layout for the entire tree and collect (oldBase - newBase)
+    // shifts for all nodes that moved. Returns true if successful and outShifts is filled.
+    bool reshapeTreeAndCollectShifts(const std::string& spiritName,
+                                     std::unordered_map<uint64_t, std::pair<float,float>>* outShifts);
+
+    // Determine whether the tree's current base positions differ from the computed
+    // layout positions (within a small epsilon). Used to enable/disable the Reshape button.
+    bool needsReshape(const std::string& spiritName, float epsilon = 0.1f);
+
 
     
     // Convert a node to JSON string
@@ -145,6 +155,11 @@ public:
     // This is intended for continuous tree dragging where the entire tree should
     // move with the cursor while preserving relative layout.
     bool moveTreeBase(const std::string& spiritName, float dx, float dy);
+    // Shift the stored base position of only the subtree rooted at subtreeRootId by (dx,dy).
+    // Returns the set of node IDs that were moved.
+    bool moveSubtreeBase(const std::string& spiritName, uint64_t subtreeRootId, float dx, float dy,
+                         std::unordered_set<uint64_t>* outMovedIds = nullptr);
+
     // Check if data is loaded
     bool isLoaded() const { return !m_trees.empty(); }
     

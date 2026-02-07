@@ -167,6 +167,11 @@ private:
     bool m_showNodeContextMenu = false;
     uint64_t m_contextMenuNodeId = TreeRenderer::NO_NODE_ID;
 
+    // Reorder mode state: allow reparenting leaves to cardinal positions (NW, N, NE)
+    bool m_reorderMode = false;
+    uint64_t m_reorderNodeId = TreeRenderer::NO_NODE_ID; // the node for which we're reordering
+    uint64_t m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID; // selected leaf to move
+
     // Tools -> FNV1a32 Generator dialog
     bool m_showFNVDialog = false;
     char m_fnvNameBuf[256] = "";

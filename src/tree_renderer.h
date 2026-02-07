@@ -53,12 +53,16 @@ public:
 
     // Selection (supports multi-select via SHIFT)
     uint64_t getSelectedNodeId() const { return m_selectedNodeId; } // primary selected node
-    void setSelectedNodeId(uint64_t id) { m_selectedNodeId = id; m_selectedNodes.clear(); if (id != NO_NODE_ID) m_selectedNodes.insert(id); }
+    // When external highlights are active (e.g., reorder mode), only allow selecting highlighted nodes
+    void setSelectedNodeId(uint64_t id) { 
+        // If selectable set is active, enforce it strictly
+        if (!m_selectableNodes.empty() && id != NO_NODE_ID && m_selectableNodes.count(id) == 0) return;
+        m_selectedNodeId = id; m_selectedNodes.clear(); if (id != NO_NODE_ID) m_selectedNodes.insert(id); }
     void clearSelection() { m_selectedNodeId = NO_NODE_ID; m_selectedNodes.clear(); }
 
     const std::unordered_set<uint64_t>& getSelectedNodeIds() const { return m_selectedNodes; }
     bool isNodeSelected(uint64_t id) const { return m_selectedNodes.count(id) > 0; }
-    void addNodeToSelection(uint64_t id) { if (id != NO_NODE_ID) { m_selectedNodes.insert(id); m_selectedNodeId = id; } }
+    void addNodeToSelection(uint64_t id) { if (id != NO_NODE_ID) { if (!m_selectableNodes.empty() && m_selectableNodes.count(id) == 0) return; m_selectedNodes.insert(id); m_selectedNodeId = id; } }
     void removeNodeFromSelection(uint64_t id) { bool wasPrimary = (m_selectedNodeId == id); m_selectedNodes.erase(id); if (m_selectedNodes.empty()) m_selectedNodeId = NO_NODE_ID; else if (wasPrimary) m_selectedNodeId = *m_selectedNodes.begin(); }
 
     // Public helper: query which node (if any) is located at the given screen position using the
@@ -144,6 +148,10 @@ private:
     std::unordered_set<uint64_t> m_freeFloatingNodes;  // Nodes that don't snap back
     std::unordered_set<uint64_t> m_frozenNodes;        // Nodes frozen due to sustained collision
     std::unordered_map<uint64_t, float> m_collisionTime; // Time spent in collision with low velocity
+    // Global collision suppression timer (seconds remaining) - when >0 collision checks are skipped
+    float m_collisionSuppressRemaining = 0.0f;
+
+
     
     // Spring physics settings
     static constexpr float SPRING_STIFFNESS = 15.0f;  // How fast nodes return
@@ -175,8 +183,35 @@ private:
         float lifetime = 1.2f; // seconds
         float radius = NODE_RADIUS;
         ImU32 color = IM_COL32(190, 60, 60, 255);
+
     };
     std::unordered_map<uint64_t, DeleteAnim> m_deleteAnims;
+
+    // Highlighted nodes (used by external modes like reorder) - renderer will adjust border
+    std::unordered_set<uint64_t> m_highlightedNodes;
+    // Selectable nodes (when non-empty, only these nodes may be selected)
+    std::unordered_set<uint64_t> m_selectableNodes;
+
+    // Arrow visibility state
+    bool m_showArrows = true;
+public:
+    // Allow callers to highlight specific nodes so the renderer can visually emphasize them
+    void setHighlightedNodes(const std::unordered_set<uint64_t>& nodes) { m_highlightedNodes = nodes; }
+    void clearHighlightedNodes() { m_highlightedNodes.clear(); }
+    // Restrict selection: when set, only these node ids may be selected
+    void setSelectableNodes(const std::unordered_set<uint64_t>& nodes) { m_selectableNodes = nodes; }
+    void clearSelectableNodes() { m_selectableNodes.clear(); }
+
+    // Suppress collisions for a given amount of seconds (used after reorder)
+    void suppressCollisions(float seconds) { m_collisionSuppressRemaining = std::max(m_collisionSuppressRemaining, seconds); m_collisionTime.clear(); m_frozenNodes.clear(); }
+
+    // Arrow visibility
+    void setShowArrows(bool s) { m_showArrows = s; }
+    void toggleShowArrows() { m_showArrows = !m_showArrows; }
+    bool showArrows() const { return m_showArrows; }
+
+    // Get the screen position (in pixels) of the node's center, return false if node not found
+    bool getNodeScreenPosition(const SpiritTree* tree, uint64_t nodeId, ImVec2* outPos) const;
 
 };
 
