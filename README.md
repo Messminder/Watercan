@@ -21,9 +21,9 @@ Further knowledge gathering is requiered to support spirits from Season of Migra
   * The restore name by ID is based of the loaded JSON, and will not reverse the FNV1a32 hash.
 * There is a raw JSON editor right under if you like:
   * With colorful text when you do the indicated keyboard shortcuts. This is a mini code editor, not a Multiline edit!
-  * When selecting multiple nodes, it reflects your selections in real-time.
+  * When selecting multiple nodes, it reflects your selections in real-time all the while keeping JSON object order.
 * Fully custom solution for browsing files in your computer!
-* Real-time reflection of edits everywhere.
+* Real-time reflection of edits everywhere, yet still performant.
 * Saves the whole file, or isolate a singular spirit in a singular JSON file.
 * Automatic Travelling Spirit identification.
   * This is based on several checks.
@@ -34,7 +34,7 @@ Further knowledge gathering is requiered to support spirits from Season of Migra
 
 *Overview of the tree editor showing nodes in a beautiful imgui interface.*
 
-![Restore Flow Animation](media/Screenshot%20From%202026-02-08%2000-50-46.png "Restore Flow Animation")
+![How pretty](media/Screenshot%20From%202026-02-08%2000-50-46.png "Restore Flow Animation")
 
 *Seriously, what a beautiful piece of software.*
 
@@ -108,4 +108,4 @@ This project is provided as-is under the MIT license.
 - File dialogs by [nativefiledialog-extended](https://github.com/btzy/nativefiledialog-extended)
 
 ## Disclaimer
-Watercan can absolutely give you a faulty file that will crash your clients if misused!
+Watercan can absolutely give you a faulty file that will crash your clients if you misuse it!
