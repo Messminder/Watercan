@@ -144,6 +144,10 @@ private:
 
     // Helper to complete a link operation to the given target (returns true on success)
     bool performLinkToTarget(uint64_t targetId);
+
+    // Reposition only the direct children of parentId to their cardinal slots
+    // and rigidly shift each child's entire descendant subtree by the same delta.
+    void repositionChildrenOfNode(uint64_t parentId);
     
     // Delete confirmation state
     bool m_deleteConfirmMode = false;
@@ -203,6 +207,9 @@ private:
 
     // Track node IDs for which 'Fix name by ID' failed to find a name in the loaded file (spirit -> set of node ids)
     std::unordered_map<std::string, std::unordered_set<uint64_t>> m_unknownNameFromLoadedFileIds;
+
+    // Reshape confirm state: When restoring from snaps, require explicit confirmation
+    bool m_restoreConfirmPending = false;
 
     // Helpers to maintain known types
     void addKnownType(const std::string& t);

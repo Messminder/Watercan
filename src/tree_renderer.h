@@ -192,8 +192,37 @@ private:
     };
     std::unordered_map<uint64_t, DeleteAnim> m_deleteAnims;
 
+    // Restore visual effects (glow + particles) triggered on Restore/Reshape actions
+    struct RestoreParticle {
+        ImVec2 pos;      // screen-space position
+        ImVec2 vel;      // screen-space velocity
+        float startTime; // seconds
+        float lifetime;  // seconds
+        ImU32 color;
+    };
+
+    // active particles and per-node glow start times
+    std::vector<RestoreParticle> m_restoreParticles;
+    std::unordered_map<uint64_t, double> m_restoreGlows; // nodeId -> start time
+    std::unordered_map<uint64_t, ImU32> m_restoreGlowColor; // nodeId -> particle color (stored until emission)
+
+    // Helper to emit particles at a given position
+    void emitParticlesAt(ImVec2 pos, ImU32 color, double now, int count = 12);
+
+public:
+    // Trigger a restore visual effect for a given node (provide the tree so node can be located)
+    void triggerRestoreEffect(const SpiritTree* tree, uint64_t nodeId);
+
     // Highlighted nodes (used by external modes like reorder) - renderer will adjust border
     std::unordered_set<uint64_t> m_highlightedNodes;
+
+    // Red pulse state (used to indicate invalid operations like duplicate names)
+    std::unordered_map<uint64_t, double> m_nodeRedPulseStart; // nodeId -> start time
+public:
+    // Pulse a node in red to indicate a validation issue (one-shot)
+    void pulseNodeRed(uint64_t nodeId) { m_nodeRedPulseStart[nodeId] = ImGui::GetTime(); }
+    // Set persistent red pulse state (on while the issue exists)
+    void setNodeRedState(uint64_t nodeId, bool active) { if (active) m_nodeRedPulseStart[nodeId] = ImGui::GetTime(); else m_nodeRedPulseStart.erase(nodeId); }
     // Selectable nodes (when non-empty, only these nodes may be selected)
     std::unordered_set<uint64_t> m_selectableNodes;
 

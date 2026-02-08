@@ -736,7 +736,7 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                                IM_COL32(0, 0, 0, 100));
         
         // Draw instruction text
-        const char* text = "Select a node to reorder";
+        const char* text = "Select a node, and click another to swap.";
         ImVec2 textSize = ImGui::CalcTextSize(text);
         ImVec2 textPos(canvasPos.x + (canvasSize.x - textSize.x) * 0.5f,
                        canvasPos.y + canvasSize.y * 0.3f);
@@ -768,6 +768,79 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                          IM_COL32(255, 80, 80, 255), 0.0f, 0, 2.0f);
     }
     
+    // Draw restore effects (particles + node glow) on top of nodes but beneath overlays
+    {
+        ImGuiIO &ioLocal = ImGui::GetIO();
+        float dt = ioLocal.DeltaTime;
+        double now = ImGui::GetTime();
+
+        // Particles: integrate, fade, and draw
+        std::vector<size_t> toRemoveIdx;
+        for (size_t i = 0; i < m_restoreParticles.size(); ++i) {
+            auto &p = m_restoreParticles[i];
+            float age = (float)(now - p.startTime);
+            if (age >= p.lifetime) { toRemoveIdx.push_back(i); continue; }
+            // integrate
+            p.pos.x += p.vel.x * dt;
+            p.pos.y += p.vel.y * dt;
+            // fade (slightly softer curve)
+            float alpha = powf(1.0f - (age / p.lifetime), 1.2f);
+            ImU32 col = p.color;
+            unsigned int r = (col >> IM_COL32_R_SHIFT) & 0xFF;
+            unsigned int g = (col >> IM_COL32_G_SHIFT) & 0xFF;
+            unsigned int b = (col >> IM_COL32_B_SHIFT) & 0xFF;
+            ImU32 colA = IM_COL32(r, g, b, (unsigned int)(alpha * 255.0f));
+            // Slightly smaller particles for subtlety
+            float rad = 1.2f + 0.6f * (1.0f - alpha);
+            drawList->AddCircleFilled(p.pos, rad, colA);
+        }
+        // Remove expired in reverse order
+        for (auto it = toRemoveIdx.rbegin(); it != toRemoveIdx.rend(); ++it) {
+            m_restoreParticles.erase(m_restoreParticles.begin() + *it);
+        }
+
+        // Glows: draw per-node contracting/fading ring; when contraction finishes, emit particles
+        std::vector<uint64_t> toEraseGlows;
+        for (const auto &kv : m_restoreGlows) {
+            uint64_t nid = kv.first;
+            double startT = kv.second;
+            float age = (float)(now - startT);
+            // Shorter lifetime for snappier contraction
+            const float LIFE = 0.5f;
+            // compute screen position for node
+            ImVec2 pos;
+            if (!getNodeScreenPosition(tree, nid, &pos)) {
+                // If node not visible, still remove glow and emit particles at approximate center
+                toEraseGlows.push_back(nid);
+                continue;
+            }
+
+            if (age >= LIFE) {
+                // Contraction finished: emit particles here
+                ImU32 color = IM_COL32(255, 220, 120, 255);
+                auto itc = m_restoreGlowColor.find(nid);
+                if (itc != m_restoreGlowColor.end()) color = itc->second;
+                emitParticlesAt(pos, color, now, 12);
+                // remove stored color and glow
+                m_restoreGlowColor.erase(nid);
+                toEraseGlows.push_back(nid);
+                continue;
+            }
+
+            float t = age / LIFE; // 0 -> 1
+            // Contract: start noticeably larger than node, contract to node radius quickly
+            float radius = NODE_RADIUS * m_zoom * (1.0f + 1.2f * (1.0f - t)); // from ~2.2 -> 1.0
+            // Slightly stronger initial alpha but still transparent overall
+            float alpha = (1.0f - t) * 0.45f; // increased opacity
+            // soft halo
+            ImU32 halo = IM_COL32(255, 220, 120, (int)(alpha * 255.0f));
+            drawList->AddCircleFilled(pos, radius, halo);
+            // ring
+            drawList->AddCircle(pos, radius * 1.03f, IM_COL32(255, 220, 120, (int)(alpha * 200.0f)), 0, 2.0f);
+        }
+        for (uint64_t id : toEraseGlows) m_restoreGlows.erase(id);
+    }
+
     // Draw delete animations (on top of overlays)
     if (!m_deleteAnims.empty()) {
         ImGuiIO &ioLocal = ImGui::GetIO();
@@ -968,6 +1041,41 @@ std::vector<TreeRenderer::SnapEvent> TreeRenderer::popPendingSnaps() {
     return out;
 }
 
+void TreeRenderer::triggerRestoreEffect(const SpiritTree* tree, uint64_t nodeId) {
+    if (!tree) return;
+    // find node and screen position
+    ImVec2 pos;
+    if (!getNodeScreenPosition(tree, nodeId, &pos)) return;
+    double now = ImGui::GetTime();
+    m_restoreGlows[nodeId] = now;
+
+    // find node color to tint particles later
+    ImU32 color = IM_COL32(255, 220, 120, 255);
+    for (const auto &n : tree->nodes) {
+        if (n.id == nodeId) { color = getNodeColor(n); break; }
+    }
+    m_restoreGlowColor[nodeId] = color; // store until contraction completes
+}
+
+void TreeRenderer::emitParticlesAt(ImVec2 pos, ImU32 color, double now, int count) {
+    for (int i = 0; i < count; ++i) {
+        float ang = ((float)i / (float)count) * 6.2831853f + ((float)(rand() % 100) / 100.0f) * 0.6f;
+        float speed = 40.0f + (rand() % 60);
+        RestoreParticle p;
+        p.pos = pos;
+        p.vel.x = cosf(ang) * speed;
+        p.vel.y = sinf(ang) * speed * 0.5f; // favor horizontal spread
+        p.startTime = (float)now;
+        p.lifetime = 0.6f + (rand() % 30) / 100.0f;
+        p.color = color;
+        m_restoreParticles.push_back(p);
+    }
+    // cap particle count
+    if (m_restoreParticles.size() > 800) {
+        m_restoreParticles.erase(m_restoreParticles.begin(), m_restoreParticles.begin() + (m_restoreParticles.size() - 800));
+    }
+}
+
 void TreeRenderer::startDeleteAnimation(uint64_t nodeId, float worldX, float worldY, ImU32 fillColor) {
     // Compute screen position for the node's world coords
     ImVec2 origin;
@@ -1062,6 +1170,20 @@ void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node,
         float selectionRadius = radius + 6.0f * zoom;
         ImU32 selectionColor = idMismatch ? IM_COL32(255, 50, 50, 255) : IM_COL32(50, 255, 50, 255);
         drawList->AddCircle(screenPos, selectionRadius, selectionColor, 0, 3.0f * zoom);
+    }
+
+    // Red pulse indicator for validation errors (duplicate names): pulsing red ring
+    auto itPulse = m_nodeRedPulseStart.find(node.id);
+    if (itPulse != m_nodeRedPulseStart.end()) {
+        double startT = itPulse->second;
+        // continuous pulsing while the entry exists (persistent until cleared via setNodeRedState)
+        float age = fmodf((float)(ImGui::GetTime() - startT), 1.0f);
+        float t = age / 1.0f;
+        float pulse = (sinf(t * 6.28318f * 2.0f) + 1.0f) * 0.5f; // 0..1
+        float alpha = (0.6f) * (0.5f + 0.5f * pulse);
+        float ringRadius = radius + 8.0f * zoom * (1.0f + 0.25f * pulse);
+        ImU32 ringColor = IM_COL32(255, 80, 80, (int)(alpha * 255.0f));
+        drawList->AddCircle(screenPos, ringRadius, ringColor, 0, 3.0f * zoom);
     }
 
     // Box-selection highlight (when user is drawing a marquee) - show a blue ring for nodes inside the box

@@ -13,6 +13,7 @@ struct SpiritNode {
     uint64_t id = 0;
     uint64_t dep = 0;  // Parent dependency (0 = root node)
     std::string name;
+    std::string originalName; // preserved initial name loaded from file (for reversion on duplicates)
     std::string spirit;
     std::string type;
     std::string costType;
@@ -127,14 +128,22 @@ public:
     // Clear any recorded snap data for a given child in a spirit (used when user manually re-links)
     void clearSnap(const std::string& spiritName, uint64_t childId);
 
+    // Check whether a given name already exists in the spirit (excluding optional node id)
+    bool isNameDuplicate(const std::string& spiritName, const std::string& name, uint64_t excludeId = 0) const;
+    // Return set of node IDs that have duplicate names within the spirit (size>1 names)
+    std::unordered_set<uint64_t> getDuplicateNodeIds(const std::string& spiritName) const;
+
 public:
-    // Map of snapped child -> original parent id (persistent until restored)
-    std::unordered_map<uint64_t, uint64_t> m_snappedParents;
+    // Map of snapped child -> original parent id and original index (persistent until restored)
+    struct SnapInfo { uint64_t parentId; size_t index; };
+    std::unordered_map<uint64_t, SnapInfo> m_snappedParents;
     // Per-tree list of snapped child ids (helps quickly check if a spirit has snaps)
     std::unordered_map<std::string, std::vector<uint64_t>> m_perTreeSnaps;
     // layout positions (within a small epsilon). Used to enable/disable the Reshape button.
     bool needsReshape(const std::string& spiritName, float epsilon = 0.1f);
 
+    // Mark a spirit's cached reshape/restore results as stale (call after any mutation)
+    void markDirty(const std::string& spiritName);
 
     
     // Convert a node to JSON string
@@ -144,6 +153,17 @@ public:
     // If the app loaded from a file, this will scan that file and return the original
     // "nm" value if present. Returns true on success.
     bool getNameFromLoadedFile(const std::string& spiritName, uint64_t nodeId, std::string* outName) const;
+
+    // Reload a single spirit from the originally loaded file, discarding all changes.
+    // Returns true if the spirit was successfully reloaded.
+    bool reloadSpirit(const std::string& spiritName);
+
+    // Clear ALL snap records for a given spirit.
+    void clearAllSnaps(const std::string& spiritName);
+
+    // Check if the spirit has been structurally modified from the loaded file:
+    // any original nodes missing, or any new/custom nodes added.
+    bool needsRestore(const std::string& spiritName) const;
 
     // Check if a spirit is a guide (has nodes with "questap" prefix or "tgc" in name)
     bool isGuide(const std::string& spiritName) const;
@@ -192,6 +212,18 @@ private:
     std::vector<std::string> m_guideNames;   // Guide spirits (in file order)
     std::vector<std::string> m_allSpiritNamesOrdered;  // All spirits in original file order
     std::string m_loadedFile;
+
+    // Cached original node IDs per spirit (populated at load time)
+    std::unordered_map<std::string, std::unordered_set<uint64_t>> m_originalNodeIds;
+
+    // Per-spirit dirty flags and cached results for needsReshape / needsRestore
+    struct CachedState {
+        bool reshapeDirty = true;
+        bool restoreDirty = true;
+        bool reshapeResult = false;
+        bool restoreResult = false;
+    };
+    mutable std::unordered_map<std::string, CachedState> m_cachedState;
 
 };
 

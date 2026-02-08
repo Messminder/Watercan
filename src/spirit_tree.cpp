@@ -34,6 +34,7 @@ bool SpiritTreeManager::loadFromFile(const std::string& filepath) {
             node.id = item.value("id", 0ULL);
             node.dep = item.value("dep", 0ULL);
             node.name = item.value("nm", "");
+            node.originalName = node.name;
             node.spirit = item.value("spirit", "");
             node.type = item.value("typ", "");
             node.costType = item.value("ctyp", "");
@@ -73,6 +74,15 @@ bool SpiritTreeManager::loadFromFile(const std::string& filepath) {
         }
 
         m_loadedFile = filepath;
+
+        // Cache original node IDs per spirit for fast needsRestore checks
+        m_originalNodeIds.clear();
+        m_cachedState.clear();
+        for (const auto& kv : m_trees) {
+            auto& ids = m_originalNodeIds[kv.first];
+            for (const auto& n : kv.second.nodes) ids.insert(n.id);
+        }
+
         return true;
 
     } catch (const std::exception& e) {
@@ -117,6 +127,7 @@ bool SpiritTreeManager::loadFromString(const std::string& jsonContents) {
             node.id = item.value("id", 0ULL);
             node.dep = item.value("dep", 0ULL);
             node.name = item.value("nm", "");
+            node.originalName = node.name;
             node.spirit = item.value("spirit", "");
             node.type = item.value("typ", "");
             node.costType = item.value("ctyp", "");
@@ -157,6 +168,15 @@ bool SpiritTreeManager::loadFromString(const std::string& jsonContents) {
 
         // When loading from string this is not a file on disk
         m_loadedFile.clear();
+
+        // Cache original node IDs per spirit
+        m_originalNodeIds.clear();
+        m_cachedState.clear();
+        for (const auto& kv : m_trees) {
+            auto& ids = m_originalNodeIds[kv.first];
+            for (const auto& n : kv.second.nodes) ids.insert(n.id);
+        }
+
         return true;
 
     } catch (const std::exception& e) {
@@ -538,7 +558,16 @@ bool SpiritTreeManager::updateNodeFromJson(const std::string& spiritName, uint64
                 changeNodeId(spiritName, node->id, newId);
             }
         }
-        if (data.contains("nm")) node->name = data["nm"].get<std::string>();
+        if (data.contains("nm")) {
+            std::string newName = data["nm"].get<std::string>();
+            // Prevent duplicate names within the same spirit
+            if (isNameDuplicate(spiritName, newName, node->id)) {
+                // Revert to original name
+                node->name = node->originalName;
+                return false;
+            }
+            node->name = newName;
+        }
         if (data.contains("spirit")) node->spirit = data["spirit"].get<std::string>();
         if (data.contains("typ")) node->type = data["typ"].get<std::string>();
         
@@ -562,6 +591,7 @@ void SpiritTreeManager::rebuildTree(const std::string& spiritName) {
     
     SpiritTree& tree = it->second;
     buildTree(tree);
+    markDirty(spiritName);
     // Note: We don't recompute layout here to preserve node positions
 }
 
@@ -580,6 +610,7 @@ bool SpiritTreeManager::moveNodeBase(const std::string& spiritName, uint64_t nod
             tree.maxY = std::max(tree.maxY, node.y);
             tree.width = tree.maxX - tree.minX;
             tree.height = tree.maxY - tree.minY;
+            markDirty(spiritName);
             return true;
         }
     }
@@ -679,18 +710,24 @@ bool SpiritTreeManager::reshapeTreeAndCollectShifts(const std::string& spiritNam
     }
 
     if (outShifts) *outShifts = std::move(mergedShifts);
+    markDirty(spiritName);
     return true;
 }
 
 bool SpiritTreeManager::needsReshape(const std::string& spiritName, float epsilon) {
+    // Check cache first
+    auto& cs = m_cachedState[spiritName];
+    if (!cs.reshapeDirty) return cs.reshapeResult;
+    cs.reshapeDirty = false;
+
     // If the spirit name is empty, nothing to do
     auto it = m_trees.find(spiritName);
-    if (it == m_trees.end()) return false;
+    if (it == m_trees.end()) { cs.reshapeResult = false; return false; }
     const SpiritTree& tree = it->second;
 
     // If there are snapped nodes recorded for this spirit, we consider reshape necessary
     auto pit = m_perTreeSnaps.find(spiritName);
-    if (pit != m_perTreeSnaps.end() && !pit->second.empty()) return true;
+    if (pit != m_perTreeSnaps.end() && !pit->second.empty()) { cs.reshapeResult = true; return true; }
 
     // Make a copy and recompute positions using layoutSubtree on each root without mutating the real tree
     SpiritTree tmp = tree;
@@ -699,7 +736,6 @@ bool SpiritTreeManager::needsReshape(const std::string& spiritName, float epsilo
     for (auto& n : tmp.nodes) idToNode[n.id] = &n;
     for (auto& n : tmp.nodes) {
         if (n.dep == 0) {
-            // find the node in tmp by id and call layoutSubtree on it
             SpiritNode* root = idToNode[n.id];
             if (root) layoutSubtree(tmp, *root, root->x, root->y, 0);
         }
@@ -714,9 +750,48 @@ bool SpiritTreeManager::needsReshape(const std::string& spiritName, float epsilo
         const SpiritNode* orig = itn->second;
         float dx = fabsf(orig->x - n.x);
         float dy = fabsf(orig->y - n.y);
-        if (dx > epsilon || dy > epsilon) return true;
+        if (dx > epsilon || dy > epsilon) { cs.reshapeResult = true; return true; }
     }
+    cs.reshapeResult = false;
     return false;
+}
+
+bool SpiritTreeManager::needsRestore(const std::string& spiritName) const {
+    // Check cache first
+    auto& cs = m_cachedState[spiritName];
+    if (!cs.restoreDirty) return cs.restoreResult;
+    cs.restoreDirty = false;
+
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) { cs.restoreResult = false; return false; }
+    const SpiritTree& tree = it->second;
+
+    // Check for any new/custom nodes (added at runtime)
+    for (const auto& n : tree.nodes) {
+        if (n.isNew) { cs.restoreResult = true; return true; }
+    }
+
+    // Compare current node IDs against cached original IDs
+    auto oit = m_originalNodeIds.find(spiritName);
+    if (oit == m_originalNodeIds.end()) { cs.restoreResult = false; return false; }
+    const auto& origIds = oit->second;
+
+    // Quick size check
+    if (tree.nodes.size() != origIds.size()) { cs.restoreResult = true; return true; }
+
+    // Check all current nodes exist in originals
+    for (const auto& n : tree.nodes) {
+        if (origIds.find(n.id) == origIds.end()) { cs.restoreResult = true; return true; }
+    }
+
+    cs.restoreResult = false;
+    return false;
+}
+
+void SpiritTreeManager::markDirty(const std::string& spiritName) {
+    auto& cs = m_cachedState[spiritName];
+    cs.reshapeDirty = true;
+    cs.restoreDirty = true;
 }
 
 void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64_t nodeId,
@@ -874,6 +949,7 @@ bool SpiritTreeManager::layoutSubtreeAndCollectShifts(const std::string& spiritN
         }
     }
 
+    markDirty(spiritName);
     return true;
 }
 
@@ -904,6 +980,7 @@ uint64_t SpiritTreeManager::createNode(const std::string& spiritName, float x, f
     // Create the new node
     SpiritNode newNode;
     newNode.name = nodeName;
+    newNode.originalName = nodeName;
     newNode.id = fnv1a32(nodeName);  // Generate ID from name
     newNode.dep = 0;  // No parent (free-floating)
     newNode.spirit = spiritName;
@@ -920,6 +997,7 @@ uint64_t SpiritTreeManager::createNode(const std::string& spiritName, float x, f
     
     // Rebuild tree relationships
     buildTree(tree);
+    markDirty(spiritName);
     
     return newNode.id;
 }
@@ -948,6 +1026,7 @@ bool SpiritTreeManager::deleteNode(const std::string& spiritName, uint64_t nodeI
     
     // Rebuild tree relationships
     buildTree(tree);
+    markDirty(spiritName);
     
     return true;
 }
@@ -955,17 +1034,36 @@ bool SpiritTreeManager::deleteNode(const std::string& spiritName, uint64_t nodeI
 void SpiritTreeManager::recordSnap(const std::string& spiritName, uint64_t childId, uint64_t oldParentId) {
     auto it = m_trees.find(spiritName);
     if (it == m_trees.end()) return;
-    // Keep map per-manager; simply record mapping child->oldParent (only if child exists in this spirit)
+    // Keep map per-manager; record mapping child -> {oldParent, oldIndex} (only if child exists in this spirit)
     SpiritTree& tree = it->second;
-    bool found = false;
-    for (const auto& n : tree.nodes) if (n.id == childId) { found = true; break; }
-    if (found) {
-        m_snappedParents[childId] = oldParentId;
-        // Also persist the mapping inside the per-tree structure in case the app needs to query it
-        // We use a simple approach: ensure we have a map inside SpiritTree to reference on reshape.
-        auto &vec = m_perTreeSnaps[spiritName];
-        if (std::find(vec.begin(), vec.end(), childId) == vec.end()) vec.push_back(childId);
+    bool childExists = false;
+    for (const auto& n : tree.nodes) if (n.id == childId) { childExists = true; break; }
+    if (!childExists) return;
+
+    // Find the old parent's child index if possible
+    size_t oldIndex = 0;
+    bool foundIndex = false;
+    for (const auto& n : tree.nodes) {
+        if (n.id == oldParentId) {
+            const SpiritNode* parent = &n;
+            for (size_t i = 0; i < parent->children.size(); ++i) {
+                if (parent->children[i] == childId) { oldIndex = i; foundIndex = true; break; }
+            }
+            break;
+        }
     }
+
+    // If we couldn't find old index (caller may have already removed child), default to append
+    if (!foundIndex) {
+        oldIndex = 0; // will clamp later during restore
+    }
+
+    m_snappedParents[childId] = SnapInfo{oldParentId, oldIndex};
+
+    // Also persist the mapping inside the per-tree structure in case the app needs to query it
+    auto &vec = m_perTreeSnaps[spiritName];
+    if (std::find(vec.begin(), vec.end(), childId) == vec.end()) vec.push_back(childId);
+    markDirty(spiritName);
 }
 
 void SpiritTreeManager::clearSnap(const std::string& spiritName, uint64_t childId) {
@@ -979,6 +1077,65 @@ void SpiritTreeManager::clearSnap(const std::string& spiritName, uint64_t childI
         auto &vec = pit->second;
         vec.erase(std::remove(vec.begin(), vec.end(), childId), vec.end());
         if (vec.empty()) m_perTreeSnaps.erase(pit);
+    }
+    markDirty(spiritName);
+}
+
+void SpiritTreeManager::clearAllSnaps(const std::string& spiritName) {
+    // Remove per-tree snap list
+    auto pit = m_perTreeSnaps.find(spiritName);
+    if (pit != m_perTreeSnaps.end()) {
+        // Also remove each child from the global map
+        for (uint64_t cid : pit->second) {
+            m_snappedParents.erase(cid);
+        }
+        m_perTreeSnaps.erase(pit);
+    }
+    markDirty(spiritName);
+}
+
+bool SpiritTreeManager::reloadSpirit(const std::string& spiritName) {
+    if (m_loadedFile.empty()) return false;
+    auto treeIt = m_trees.find(spiritName);
+    if (treeIt == m_trees.end()) return false;
+
+    try {
+        std::ifstream f(m_loadedFile);
+        if (!f.is_open()) return false;
+        json data = json::parse(f);
+
+        // Collect original nodes for this spirit from the file
+        std::vector<SpiritNode> originalNodes;
+        for (const auto& item : data) {
+            std::string spirit = item.value("spirit", std::string());
+            if (spirit != spiritName) continue;
+            SpiritNode node;
+            node.id = item.value("id", 0ULL);
+            node.dep = item.value("dep", 0ULL);
+            node.name = item.value("nm", std::string());
+            node.originalName = node.name;
+            node.spirit = spirit;
+            node.type = item.value("typ", std::string());
+            node.costType = item.value("ctyp", std::string());
+            node.cost = item.value("cst", 0);
+            node.isAdventurePass = item.value("ap", false);
+            node.isNew = false;
+            originalNodes.push_back(node);
+        }
+
+        // Replace the tree's nodes entirely and rebuild
+        SpiritTree& tree = treeIt->second;
+        tree.nodes = std::move(originalNodes);
+        buildTree(tree);
+        computeLayout(tree);
+
+        // Clear all snap records for this spirit
+        clearAllSnaps(spiritName);
+        markDirty(spiritName);
+
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 std::vector<uint64_t> SpiritTreeManager::restoreSnaps(const std::string& spiritName) {
@@ -994,17 +1151,21 @@ std::vector<uint64_t> SpiritTreeManager::restoreSnaps(const std::string& spiritN
 
     // Reattach any snapped nodes if their original parent still exists
     std::vector<uint64_t> toErase;
+    std::vector<std::pair<uint64_t,size_t>> restoredWithIndex; // (childId, originalIndex)
     for (auto itKv = m_snappedParents.begin(); itKv != m_snappedParents.end(); ) {
         uint64_t childId = itKv->first;
-        uint64_t oldParent = itKv->second;
+        SnapInfo info = itKv->second;
+        uint64_t oldParent = info.parentId;
         auto itChild = idToNode.find(childId);
         auto itParent = idToNode.find(oldParent);
         if (itChild != idToNode.end() && itParent != idToNode.end()) {
+            // Reattach to old parent
             itChild->second->dep = oldParent;
             toErase.push_back(childId);
             restored.push_back(childId);
+            restoredWithIndex.push_back(std::make_pair(childId, info.index));
+            // Remove from map and per-tree lists now, we'll apply original indices after rebuild
             itKv = m_snappedParents.erase(itKv);
-            // remove from per-tree snaps list
             auto &vec = m_perTreeSnaps[spiritName];
             vec.erase(std::remove(vec.begin(), vec.end(), childId), vec.end());
         } else {
@@ -1014,7 +1175,56 @@ std::vector<uint64_t> SpiritTreeManager::restoreSnaps(const std::string& spiritN
 
     // Rebuild tree relationships if we restored any nodes so subsequent layout calls
     // operate on the full tree structure
-    if (!toErase.empty()) rebuildTree(spiritName);
+    if (!toErase.empty()) {
+        rebuildTree(spiritName);
+        // After rebuild we should ensure each restored node occupies its original index
+        const SpiritTree* tptr = getTree(spiritName);
+        if (tptr) {
+            // Convert tree to mutable reference to adjust parent->children ordering
+            SpiritTree& treeRef = const_cast<SpiritTree&>(*tptr);
+            for (const auto &pr : restoredWithIndex) {
+                uint64_t rid = pr.first;
+                size_t idx = pr.second;
+                // Find child
+                SpiritNode* child = nullptr;
+                for (auto &n : treeRef.nodes) {
+                    if (n.id == rid) { child = &n; break; }
+                }
+                if (!child) continue;
+                // Find parent by id recorded in child->dep
+                SpiritNode* parent = nullptr;
+                for (auto &n : treeRef.nodes) {
+                    if (n.id == child->dep) { parent = &n; break; }
+                }
+                if (!parent) continue;
+                // Remove any existing entries of child from parent's list
+                parent->children.erase(std::remove(parent->children.begin(), parent->children.end(), rid), parent->children.end());
+                // Clamp index and insert
+                size_t insertIdx = std::min(idx, parent->children.size());
+                parent->children.insert(parent->children.begin() + insertIdx, rid);
+            }
+        }
+    }
+
+    // Rebuild tree relationships if we restored any nodes so subsequent layout calls
+    // operate on the full tree structure
+    if (!toErase.empty()) {
+        rebuildTree(spiritName);
+        // After rebuild we should ensure each restored node occupies its original index
+        // (so reorder and manual child ordering persists across snaps)
+        const SpiritTree* tptr = getTree(spiritName);
+        if (tptr) {
+            for (uint64_t rid : restored) {
+                // We didn't keep the original index in the map because we erased entries above.
+                // Instead, check if we have any stored information in m_perTreeSnaps? Not directly.
+                // Strategy: when recordSnap is called it already stored index in the SnapInfo map; since
+                // we removed the map entry above, we need to reconstruct: callers should record SnapInfo
+                // in m_perTreeSnaps as needed. For now, best-effort: leave ordering as-is (append) if no index found.
+                // (This branch is conservative and will be improved if we keep temp index mapping)
+                // TODO: preserve and apply original index for restored children.
+            }
+        }
+    }
 
     // Additionally, if any snaps remain (children detached but their parent missing),
     // keep the reshape button enabled so the user can Restore once file state is consistent.
@@ -1029,6 +1239,35 @@ bool SpiritTreeManager::hasSnapsInternal(const std::string& spiritName) const {
     auto it = m_perTreeSnaps.find(spiritName);
     if (it == m_perTreeSnaps.end()) return false;
     return !it->second.empty();
+}
+
+bool SpiritTreeManager::isNameDuplicate(const std::string& spiritName, const std::string& name, uint64_t excludeId) const {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    const SpiritTree& tree = it->second;
+    for (const auto& n : tree.nodes) {
+        if (n.id == excludeId) continue;
+        if (n.name == name) return true;
+    }
+    return false;
+}
+
+std::unordered_set<uint64_t> SpiritTreeManager::getDuplicateNodeIds(const std::string& spiritName) const {
+    std::unordered_set<uint64_t> out;
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return out;
+    const SpiritTree& tree = it->second;
+    // map name -> vector of ids
+    std::unordered_map<std::string, std::vector<uint64_t>> nameMap;
+    for (const auto& n : tree.nodes) {
+        nameMap[n.name].push_back(n.id);
+    }
+    for (const auto& kv : nameMap) {
+        if (kv.second.size() > 1) {
+            for (uint64_t id : kv.second) out.insert(id);
+        }
+    }
+    return out;
 }
 
 bool SpiritTreeManager::hasSnaps(const std::string& spiritName) const {

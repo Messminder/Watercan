@@ -2085,6 +2085,18 @@ void App::renderTreeViewport() {
                     }
                 }
 
+                // Sever children from the deleted node — they become free-floating roots
+                // (a new independent subtree). Do NOT reparent to grandparent.
+                if (!oldChildren.empty()) {
+                    for (uint64_t cid : oldChildren) {
+                        SpiritNode* ch = m_treeManager.getNode(m_selectedSpirit, cid);
+                        if (ch) {
+                            ch->dep = 0;
+                            m_treeRenderer.setFreeFloating(cid);
+                        }
+                    }
+                }
+
                 // Actually delete the node
                 m_treeManager.deleteNode(m_selectedSpirit, m_deleteNodeId);
                 m_treeRenderer.clearFreeFloating(m_deleteNodeId);
@@ -2093,28 +2105,8 @@ void App::renderTreeViewport() {
                     m_treeRenderer.removeNodeFromSelection(m_deleteNodeId);
                 }
 
-                // If the deleted node had a parent, we always relayout the subtree rooted at that parent
-                // (even if the deleted node had no children) so any remaining single child will be placed North.
-                if (oldParent != 0) {
-                    if (!oldChildren.empty()) {
-                        for (uint64_t cid : oldChildren) {
-                            SpiritNode* ch = m_treeManager.getNode(m_selectedSpirit, cid);
-                            if (ch) {
-                                ch->dep = oldParent;
-                            }
-                        }
-                    }
-
-                    // Rebuild relationships and relayout the subtree rooted at the old parent
-                    m_treeManager.rebuildTree(m_selectedSpirit);
-                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, oldParent, &shifts)) {
-                        // Apply base shifts so nodes animate smoothly into their new positions
-                        for (const auto& kv : shifts) {
-                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
-                        }
-                    }
-                }
+                // Rebuild relationships only (no layout recomputation)
+                m_treeManager.rebuildTree(m_selectedSpirit);
 
                 m_deleteConfirmMode = false;
                 m_deleteNodeId = 0;
@@ -2165,42 +2157,10 @@ void App::renderTreeViewport() {
             ImGui::PopStyleColor(4);
 
             // If a leaf has been selected, show NW/N/NE buttons inside an overlay window anchored to the viewport's top-right
+            // Reorder insert buttons removed — keep Cancel visible only
             if (m_reorderSelectedLeafId != TreeRenderer::NO_NODE_ID) {
-                ImVec2 winPosLocal2 = ImGui::GetWindowPos();
-                ImVec2 winSizeLocal2 = ImGui::GetWindowSize();
-                float btnPadding2 = style.WindowPadding.x;
-                ImVec2 textSizeNW = ImGui::CalcTextSize("NW");
-                float btnW2 = textSizeNW.x + style.FramePadding.x * 2.0f + 12.0f;
-                float gap = 8.0f;
-                float totalW = btnW2 * 3 + gap * 2;
-                float startX = winPosLocal2.x + winSizeLocal2.x - btnPadding2 - totalW;
-                float y = winPosLocal2.y + btnPadding2; // anchor to top-right inside viewport
-
-                // Create a small overlay window so the buttons don't affect layout
-                ImGui::SetNextWindowPos(ImVec2(startX, y), ImGuiCond_Always);
-                ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize;
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-                if (ImGui::Begin("##ReorderButtons", nullptr, flags)) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.85f, 0.0f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.7f, 0.0f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-                    if (ImGui::Button("NW", ImVec2(btnW2, 0))) {
-                        performReorderInsert(0);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("N", ImVec2(btnW2, 0))) {
-                        performReorderInsert(1);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("NE", ImVec2(btnW2, 0))) {
-                        performReorderInsert(2);
-                    }
-                    ImGui::PopStyleColor(4);
-                    ImGui::End();
-                    ImGui::PopStyleVar();
-                }
+                // Buttons NW/N/NE intentionally removed per user request.
+                // Reorder operations are performed by selecting and swapping highlighted leaves.
             }
         } else if (m_linkMode) {
             // Anchor "Cancel Link" to the right edge when in link mode
@@ -2249,50 +2209,119 @@ void App::renderTreeViewport() {
             ImGui::SetCursorScreenPos(ImVec2(reshapeX, btnY));
             bool canReshape = false;
             bool hasSnaps = false;
+            bool needsRestore = false;
             if (!m_selectedSpirit.empty()) {
                 canReshape = m_treeManager.needsReshape(m_selectedSpirit);
                 hasSnaps = m_treeManager.hasSnaps(m_selectedSpirit);
-                canReshape = canReshape || hasSnaps;
+                needsRestore = hasSnaps || m_treeManager.needsRestore(m_selectedSpirit);
+                canReshape = canReshape || needsRestore;
             }
             ImGui::BeginDisabled(!canReshape);
-            const char* reshapeLabel = hasSnaps ? "* Restore" : "* Reshape";
-            if (ImGui::Button(reshapeLabel, ImVec2(reshapeBtnW, 0))) {
-                // If snaps exist, restore them so reshape acts on full tree
-                std::vector<uint64_t> restored;
-                if (hasSnaps) restored = m_treeManager.restoreSnaps(m_selectedSpirit);
+            // When a restore is needed (snaps, missing originals, or custom nodes),
+            // require a confirm step before performing a full reload.
+            if (needsRestore) {
+                if (!m_restoreConfirmPending) {
+                    if (ImGui::Button("* Restore", ImVec2(reshapeBtnW, 0))) {
+                        m_restoreConfirmPending = true;
+                    }
+                } else {
+                    // Confirmation UI: position the confirmation controls immediately left of the Arrows button
+                    ImGuiStyle &styleLocal = ImGui::GetStyle();
+                    float smallW = reshapeBtnW * 0.5f; // each button is half the reshape button
+                    float textW = ImGui::CalcTextSize("Are you sure?").x;
+                    float innerGap = 6.0f; // small spacing between text and buttons
+                    // total width: text + gap + two buttons + a bit of padding
+                    float totalW = textW + innerGap + (smallW * 2.0f) + (styleLocal.FramePadding.x * 2.0f);
+                    // Place the controls so their right edge sits just left of the Arrows button
+                    ImGui::SetCursorScreenPos(ImVec2(arrowsX - totalW - gap * 0.5f, btnY));
+                    ImGui::Text("Are you sure?"); ImGui::SameLine();
+                    if (ImGui::Button("Yes", ImVec2(smallW, 0))) {
+                        // Collect old node positions and colors for animations
+                        std::unordered_map<uint64_t, std::pair<float,float>> oldPos;
+                        std::unordered_map<uint64_t, ImU32> oldColors;
+                        {
+                            const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
+                            if (tptr) {
+                                for (const auto& n : tptr->nodes) {
+                                    oldPos[n.id] = std::make_pair(n.x, n.y);
+                                    oldColors[n.id] = m_treeRenderer.getNodeFillColorForNode(n);
+                                }
+                            }
+                        }
 
-                // If restore returned specific node ids, compute and apply subtree shifts for each
-                std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-                if (!restored.empty()) {
-                    for (uint64_t rid : restored) {
-                        m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, rid, &shifts);
-                        // Restored nodes should no longer be free-floating so they can snap back and participate in physics
-                        m_treeRenderer.clearFreeFloating(rid);
+                        // Force-reload the spirit from the originally loaded file.
+                        // This discards ALL changes: custom nodes, reorders, snaps, renames.
+                        bool reloaded = m_treeManager.reloadSpirit(m_selectedSpirit);
+
+                        if (reloaded) {
+                            // Clear all free-floating markers and traverse new tree
+                            const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
+                            if (tptr) {
+                                for (const auto& n : tptr->nodes) {
+                                    m_treeRenderer.clearFreeFloating(n.id);
+
+                                    // Compute animated shift from old position -> new position
+                                    auto it = oldPos.find(n.id);
+                                    if (it != oldPos.end()) {
+                                        float dx = it->second.first  - n.x;
+                                        float dy = it->second.second - n.y;
+                                        float mag = sqrtf(dx*dx + dy*dy);
+                                        if (mag > 0.5f) {
+                                            m_treeRenderer.applyBaseShift(n.id, dx, dy);
+                                            m_treeRenderer.triggerRestoreEffect(tptr, n.id);
+                                        }
+                                    }
+                                    m_treeRenderer.thawNode(n.id);
+                                }
+                            }
+                            // Trigger delete animation for nodes that were removed by the reload
+                            std::unordered_set<uint64_t> newIds;
+                            if (tptr) {
+                                for (const auto& n : tptr->nodes) newIds.insert(n.id);
+                            }
+                            for (const auto& kv : oldPos) {
+                                if (newIds.find(kv.first) == newIds.end()) {
+                                    // Node was deleted — play delete animation at its old position
+                                    ImU32 col = IM_COL32(180, 180, 180, 255);
+                                    auto cit = oldColors.find(kv.first);
+                                    if (cit != oldColors.end()) col = cit->second;
+                                    m_treeRenderer.startDeleteAnimation(kv.first, kv.second.first, kv.second.second, col);
+                                }
+                                m_treeRenderer.clearFreeFloating(kv.first);
+                            }
+                            m_treeRenderer.suppressCollisions(2.0f);
+                        }
+
+                        // Clear confirmation state
+                        m_restoreConfirmPending = false;
                     }
-                    // Also thaw every node affected by the restore so they rejoin physics simulation
-                    for (const auto &kv : shifts) {
-                        m_treeRenderer.clearFreeFloating(kv.first);
-                        m_treeRenderer.thawNode(kv.first);
+                    ImGui::SameLine();
+                    if (ImGui::Button("No", ImVec2(smallW, 0))) {
+                        m_restoreConfirmPending = false;
                     }
-                    // Briefly suppress collisions during a restore so nodes aren't immediately frozen
-                    m_treeRenderer.suppressCollisions(0.5f);
                 }
-
-                // Also recompute global reshape shifts for the whole tree (covers general relayout)
-                if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
-                    for (const auto& kv : shifts) {
-                        m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+            } else {
+                // Normal Reshape behavior (no snaps)
+                const char* reshapeLabel = "* Reshape";
+                if (ImGui::Button(reshapeLabel, ImVec2(reshapeBtnW, 0))) {
+                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                    if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
+                        const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
+                        for (const auto& kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                            float dx = kv.second.first; float dy = kv.second.second;
+                            float mag = sqrtf(dx*dx + dy*dy);
+                            if (mag > 1.5f && tptr) m_treeRenderer.triggerRestoreEffect(tptr, kv.first);
+                        }
+                        m_treeRenderer.suppressCollisions(2.0f);
                     }
-                    m_treeRenderer.suppressCollisions(2.0f);
-                }
 
-                // For extra FUN: thaw every node in the current spirit so the whole tree
-                // participates in physics immediately after Restore/Reshape.
-                if (!m_selectedSpirit.empty()) {
-                    const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
-                    if (tptr) {
-                        for (const auto& n : tptr->nodes) {
-                            m_treeRenderer.thawNode(n.id);
+                    if (!m_selectedSpirit.empty()) {
+                        const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
+                        if (tptr) {
+                            for (const auto& n : tptr->nodes) {
+                                m_treeRenderer.thawNode(n.id);
+                            }
                         }
                     }
                 }
@@ -2378,17 +2407,59 @@ void App::renderTreeViewport() {
             // Detach child from its parent (becomes free-floating)
             SpiritNode* childNode = m_treeManager.getNode(m_selectedSpirit, s.childId);
             if (childNode) {
+                // Record snap mapping BEFORE we change the tree so we capture original index
+                m_treeManager.recordSnap(m_selectedSpirit, s.childId, s.parentId);
                 childNode->dep = 0;
                 m_treeRenderer.setFreeFloating(s.childId);
-                // Rebuild and animate layout shifts
+                // Rebuild relationships so the parent no longer lists this child
                 m_treeManager.rebuildTree(m_selectedSpirit);
+
+                // Recompute layout only for the subtree rooted at the old parent (where the child was detached)
                 std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-                if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
-                    for (const auto& kv : shifts) m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                if (s.parentId != 0) {
+                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, s.parentId, &shifts)) {
+                        for (const auto& kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                            m_treeRenderer.thawNode(kv.first);
+                        }
+                    }
+                } else {
+                    // Fallback to full reshape if the parent was root
+                    if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
+                        for (const auto& kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                            m_treeRenderer.thawNode(kv.first);
+                        }
+                    }
                 }
+
                 m_treeRenderer.suppressCollisions(1.0f);
-                // Record snap in the tree manager so a future Reshape can reattach this node
-                m_treeManager.recordSnap(m_selectedSpirit, s.childId, s.parentId);
+            }
+        }
+    }
+
+    // Persistent duplicate-name detection: ensure offending nodes pulse until fixed and message stays
+    if (!m_selectedSpirit.empty()) {
+        auto dupIds = m_treeManager.getDuplicateNodeIds(m_selectedSpirit);
+        if (!dupIds.empty()) {
+            // Set persistent message
+            m_treeMessage = "Node with same name found.";
+            m_treeMessageUntil = std::chrono::steady_clock::time_point::max();
+            // Mark nodes as red-pulsing
+            for (uint64_t id : dupIds) m_treeRenderer.setNodeRedState(id, true);
+            // Also ensure any nodes no longer duplicates are cleared
+            const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
+            if (tptr) {
+                for (const auto& n : tptr->nodes) {
+                    if (dupIds.count(n.id) == 0) m_treeRenderer.setNodeRedState(n.id, false);
+                }
+            }
+        } else {
+            // No duplicates: clear message if it matches our duplicate message and clear pulses
+            if (m_treeMessage == "Node with same name found.") m_treeMessage.clear();
+            const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
+            if (tptr) {
+                for (const auto& n : tptr->nodes) m_treeRenderer.setNodeRedState(n.id, false);
             }
         }
     }
@@ -2431,11 +2502,8 @@ void App::renderTreeViewport() {
                         if (itA != children.end() && itB != children.end()) {
                             std::iter_swap(itA, itB);
 
-                            // Re-layout subtree and apply shifts for smooth animation
-                            std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-                            if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, m_reorderNodeId, &shifts)) {
-                                for (const auto& kv : shifts) m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
-                            }
+                            // Reposition direct children and rigidly shift their subtrees
+                            repositionChildrenOfNode(m_reorderNodeId);
 
                             // Briefly suppress collisions so the nodes settle
                             m_treeRenderer.suppressCollisions(2.0f);
@@ -2674,27 +2742,40 @@ void App::renderTreeViewport() {
         if (ImGui::MenuItem("Clear Links", nullptr, false, canClearLinks)) {
             SpiritNode* node = m_treeManager.getNode(m_selectedSpirit, m_contextMenuNodeId);
             if (node) {
+                // Record this detach as a snap so Restore can reattach it later
+                uint64_t oldParent = node->dep;
+
+                // Record snap mapping BEFORE changing the tree so we capture the original index
+                m_treeManager.recordSnap(m_selectedSpirit, m_contextMenuNodeId, oldParent);
+
                 // Remove parent dependency and mark as free-floating (like a snap)
                 node->dep = 0;
                 m_treeRenderer.setFreeFloating(m_contextMenuNodeId);
 
-                // Clear any recorded snap info since this was an explicit manual action
-                m_treeManager.clearSnap(m_selectedSpirit, m_contextMenuNodeId);
-
                 // Rebuild relationships so the parent no longer lists this node as a child
                 m_treeManager.rebuildTree(m_selectedSpirit);
 
-                // Recompute layout for the whole tree and animate shifted nodes into place
+                // Recompute layout just for the subtree rooted at the old parent (less disruptive than full reshape)
                 std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-                if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
-                    for (const auto& kv : shifts) {
-                        m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
-                        // Thaw moved nodes so they participate in physics
-                        m_treeRenderer.thawNode(kv.first);
+                if (oldParent != 0) {
+                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, oldParent, &shifts)) {
+                        for (const auto& kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                            // Thaw moved nodes so they participate in physics
+                            m_treeRenderer.thawNode(kv.first);
+                        }
+                    }
+                } else {
+                    // If oldParent was root (0) fallback to global reshape
+                    if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
+                        for (const auto& kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                            m_treeRenderer.thawNode(kv.first);
+                        }
                     }
                 }
 
-                // Give a short window to suppress collisions so nodes can settle, and nudge whole tree
+                // Give a short window to suppress collisions so nodes can settle
                 m_treeRenderer.suppressCollisions(1.0f);
             }
         }
@@ -2807,16 +2888,106 @@ bool App::performLinkToTarget(uint64_t targetId) {
     m_treeRenderer.clearFreeFloating(m_linkSourceNodeId);
     m_treeManager.clearSnap(m_selectedSpirit, m_linkSourceNodeId);
 
-    // Rebuild tree relationships and apply layout shifts for the new parent subtree
+    // Rebuild tree relationships so parent->children reflects current deps
     m_treeManager.rebuildTree(m_selectedSpirit);
-    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-    m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, targetId, &shifts);
-    for (const auto& kv : shifts) {
-        m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+
+    // Smart insertion: compute desired child index based on source node position so
+    // linking to an occupied slot will shift existing children as appropriate.
+    SpiritNode* parent = m_treeManager.getNode(m_selectedSpirit, targetId);
+    if (parent) {
+        // Remove any existing instance of the source id from parent's children
+        parent->children.erase(std::remove(parent->children.begin(), parent->children.end(), m_linkSourceNodeId), parent->children.end());
+
+        // Determine insertion index using deterministic cardinal rules:
+        //  - 0 children: insert at 0
+        //  - 1 child (currently N): push the existing to NW and insert new at N (index 1)
+        //  - 2+ children: append as NE
+        size_t childCountBefore = parent->children.size();
+        size_t insertIdx = childCountBefore; // default append
+        if (childCountBefore == 0) insertIdx = 0;
+        else if (childCountBefore == 1) insertIdx = 1; // push existing to NW, new becomes N
+        else insertIdx = childCountBefore; // append as NE (or after existing children)
+
+        if (insertIdx > parent->children.size()) insertIdx = parent->children.size();
+        parent->children.insert(parent->children.begin() + insertIdx, m_linkSourceNodeId);
     }
+
+    // Reposition the direct children of the target to their cardinal slots.
+    // Each child's descendant subtree is rigidly shifted by the same delta.
+    repositionChildrenOfNode(targetId);
+
+    // Also thaw the source node itself so it participates in physics
+    m_treeRenderer.thawNode(m_linkSourceNodeId);
 
     m_treeRenderer.suppressCollisions(2.0f);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Reposition ONLY the direct children of `parentId` to their cardinal slots
+// (NW / N / NE etc.) and rigidly shift each child's entire descendant subtree
+// by the same delta so manually-arranged deeper nodes are preserved.
+// ---------------------------------------------------------------------------
+void App::repositionChildrenOfNode(uint64_t parentId) {
+    SpiritNode* parent = m_treeManager.getNode(m_selectedSpirit, parentId);
+    if (!parent) return;
+
+    const float nodeSpacingY = 100.0f;
+    const float nodeSpacingX = 120.0f;
+    const float diagonalYOffset = -25.0f;
+
+    size_t childCount = parent->children.size();
+    for (size_t i = 0; i < childCount; ++i) {
+        SpiritNode* child = m_treeManager.getNode(m_selectedSpirit, parent->children[i]);
+        if (!child) continue;
+
+        float newX = parent->x;
+        float newY = parent->y + nodeSpacingY;
+
+        if (childCount == 1) {
+            newX = parent->x;
+        } else if (childCount == 2) {
+            if (i == 0) { newX = parent->x - nodeSpacingX; newY += diagonalYOffset; } // NW
+            else        { newX = parent->x; }                                          // N
+        } else if (childCount == 3) {
+            if (i == 0)      { newX = parent->x - nodeSpacingX; newY += diagonalYOffset; } // NW
+            else if (i == 1) { newX = parent->x; }                                          // N
+            else             { newX = parent->x + nodeSpacingX; newY += diagonalYOffset; }   // NE
+        } else {
+            float startX = parent->x - nodeSpacingX * (float(childCount - 1) * 0.5f);
+            newX = startX + (float)i * nodeSpacingX;
+            float centerIndex = (childCount - 1) * 0.5f;
+            if (std::fabs((float)i - centerIndex) > 0.01f) newY += diagonalYOffset;
+        }
+
+        float dx = child->x - newX;  // old - new
+        float dy = child->y - newY;
+
+        // Skip children that are already at the correct position
+        if (std::fabs(dx) < 0.01f && std::fabs(dy) < 0.01f) continue;
+
+        // Move the child to its new cardinal position
+        child->x = newX;
+        child->y = newY;
+        m_treeRenderer.applyBaseShift(child->id, dx, dy);
+        m_treeRenderer.thawNode(child->id);
+
+        // Rigidly shift ALL descendants of this child by the same delta
+        // so their relative arrangement is preserved (they "follow along").
+        std::vector<uint64_t> stack;
+        for (uint64_t gc : child->children) stack.push_back(gc);
+        while (!stack.empty()) {
+            uint64_t cur = stack.back(); stack.pop_back();
+            SpiritNode* desc = m_treeManager.getNode(m_selectedSpirit, cur);
+            if (!desc) continue;
+            // Move by the same vector as the parent child: (newX - oldX) = -dx
+            desc->x -= dx;
+            desc->y -= dy;
+            m_treeRenderer.applyBaseShift(desc->id, dx, dy);
+            m_treeRenderer.thawNode(desc->id);
+            for (uint64_t gc2 : desc->children) stack.push_back(gc2);
+        }
+    }
 }
 
 // Helper: perform insertion of the currently selected leaf into the reorder node at the given index
@@ -2842,11 +3013,8 @@ void App::performReorderInsert(size_t index) {
         size_t idx = std::min(index, parent->children.size());
         parent->children.insert(parent->children.begin() + idx, m_reorderSelectedLeafId);
 
-        // Re-layout subtree and apply animated shifts
-        std::unordered_map<uint64_t, std::pair<float,float>> shifts;
-        if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, m_reorderNodeId, &shifts)) {
-            for (const auto& kv : shifts) m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
-        }
+        // Reposition direct children and rigidly shift their subtrees
+        repositionChildrenOfNode(m_reorderNodeId);
     }
 
     // Briefly suppress collisions and exit reorder mode
@@ -3151,8 +3319,19 @@ void App::renderNodeDetails() {
     char nameBuf[256];
     strncpy(nameBuf, selectedNode->name.c_str(), sizeof(nameBuf));
     if (ImGui::InputText("##nm", nameBuf, sizeof(nameBuf))) {
-        selectedNode->name = std::string(nameBuf);
-        attrChanged = true;
+        std::string newName = std::string(nameBuf);
+        // Check for duplicate names in this spirit
+        if (m_treeManager.isNameDuplicate(m_selectedSpirit, newName, selectedNode->id)) {
+            // Revert to initial name and inform the user
+            selectedNode->name = selectedNode->originalName;
+            m_treeMessage = "Node with same name found.";
+            m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            // Visual pulse on offending node
+            m_treeRenderer.pulseNodeRed(selectedNode->id);
+        } else {
+            selectedNode->name = newName;
+            attrChanged = true;
+        }
     }
 
 
@@ -3368,16 +3547,29 @@ void App::renderNodeJsonEditor() {
 
     // Multiple selected: reflect in JSON editor but make read-only
     if (selectedIds.size() > 1) {
-        // If selection changed, rebuild the JSON array buffer
+        // If selection changed, rebuild the JSON array buffer. Preserve original tree order
+        // by iterating the spirit's nodes in their stored order and including only the
+        // selected ones. This prevents unordered_set iteration from changing ordering.
         if (m_lastEditedNodeId != primaryId || m_lastEditedSelectionCount != (int)selectedIds.size()) {
             std::string arr = "[\n";
             bool first = true;
-            for (uint64_t id : selectedIds) {
-                SpiritNode* n = m_treeManager.getNode(m_selectedSpirit, id);
-                if (!n) continue;
-                if (!first) arr += ",\n";
-                arr += SpiritTreeManager::nodeToJson(*n);
-                first = false;
+            const SpiritTree* tree = m_treeManager.getTree(m_selectedSpirit);
+            if (tree) {
+                for (const auto& node : tree->nodes) {
+                    if (selectedIds.count(node.id) == 0) continue;
+                    if (!first) arr += ",\n";
+                    arr += SpiritTreeManager::nodeToJson(node);
+                    first = false;
+                }
+            } else {
+                // Fallback to previous behavior if tree not available
+                for (uint64_t id : selectedIds) {
+                    SpiritNode* n = m_treeManager.getNode(m_selectedSpirit, id);
+                    if (!n) continue;
+                    if (!first) arr += ",\n";
+                    arr += SpiritTreeManager::nodeToJson(*n);
+                    first = false;
+                }
             }
             arr += "\n]";
             m_textEditor.SetText(arr);
@@ -3430,18 +3622,44 @@ void App::renderNodeJsonEditor() {
         uint64_t newNodeId = 0;
         uint64_t selectedNodeId = m_treeRenderer.getSelectedNodeId();
         const std::string txt = m_textEditor.GetText();
-        if (m_treeManager.updateNodeFromJson(m_selectedSpirit, selectedNodeId, txt, &newNodeId)) {
-            m_jsonParseError = false;
-            m_jsonErrorMsg.clear();
-            if (newNodeId != selectedNodeId) {
-                m_treeRenderer.setSelectedNodeId(newNodeId);
-                m_lastEditedNodeId = newNodeId;
+        try {
+            auto data = nlohmann::json::parse(txt);
+            // If name change requested, validate uniqueness first
+            if (data.contains("nm")) {
+                std::string attempted = data["nm"].get<std::string>();
+                if (m_treeManager.isNameDuplicate(m_selectedSpirit, attempted, selectedNodeId)) {
+                    // Revert editor text to original node JSON and inform user
+                    SpiritNode* node = m_treeManager.getNode(m_selectedSpirit, selectedNodeId);
+                    if (node) {
+                        m_textEditor.SetText(SpiritTreeManager::nodeToJson(*node));
+                        m_treeMessage = "Node with same name found.";
+                        m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                        m_treeRenderer.pulseNodeRed(selectedNodeId);
+                    }
+                    m_jsonParseError = true;
+                    m_jsonErrorMsg = "Duplicate name";
+                    // Skip attempting to apply the edit
+                    goto JSON_EDIT_END;
+                }
             }
-        } else {
+
+            if (m_treeManager.updateNodeFromJson(m_selectedSpirit, selectedNodeId, txt, &newNodeId)) {
+                m_jsonParseError = false;
+                m_jsonErrorMsg.clear();
+                if (newNodeId != selectedNodeId) {
+                    m_treeRenderer.setSelectedNodeId(newNodeId);
+                    m_lastEditedNodeId = newNodeId;
+                }
+            } else {
+                m_jsonParseError = true;
+                m_jsonErrorMsg = "Invalid JSON";
+            }
+        } catch (...) {
             m_jsonParseError = true;
             m_jsonErrorMsg = "Invalid JSON";
         }
     }
+    JSON_EDIT_END: ;
 
     // Right-click context menu for the JSON editor has been removed
 
