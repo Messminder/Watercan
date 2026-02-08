@@ -1,26 +1,32 @@
 # Watercan!
 To water and grow **spirit trees!**
 
-Watercan is a dependency tree viewer and editor specialized for Sky: COTL.
+Watercan is a dependency tree viewer and editor specialized for Sky: Children Of The Light.
 It is currently intended for private server software developers, but anyone can use it to create their own spirit trees that are compatible with ThatModdingCommunity, NightSky Communal Ark and other private server softwares.
 
-Currently, this software is **almost** on point for release, but you're welcome to download it's earlybird on each of it's repo branch in the Standalone folder.
+Currently, this software is **almost** on point for release, but you're welcome to download it's earlybird on each of it's repo branch in the Standalone folder. It supports all spirits from The Season of Belonging until The Season of the Two Embers Part I. (Sky: Light awaits -> Sky: COTL 0.32.0)
+
+Further knowledge gathering is requiered to support spirits from Season of Migration and onward.
 
 ## Nice features:
 * Interactive dependency tree viewer and editor. Allowing the user to add, delete, link and unlink nodes
   * Have your own color codes and save user preferences.
   * Nodes even has physics because F U N.
+  * Multi-select node support and selection box drawing.
+  * Elastic relationship lines. They act like rubberbands that can snap if you pull them too far apart. Creating a fun way to manage dependencies.
+  * Context menu for quick commands.
 * Easy to use and understandable Node attribute editor:
   * Use the scrollwheel on the Cost (cst) to quickly select numbers.
   * FNV1a32 id and programatic name mismatch detection and automatic fix at the click of a button.
+  * The restore name by ID is based of the loaded JSON, and will not reverse the FNV1a32 hash.
 * There is a raw JSON editor right under if you like:
-  * With colorful text when you do the indicated keyboard shortcuts.
+  * With colorful text when you do the indicated keyboard shortcuts. This is a mini code editor, not a Multiline edit!
   * When selecting multiple nodes, it reflects your selections in real-time.
 * Fully custom solution for browsing files in your computer!
 * Real-time reflection of edits everywhere.
 * Saves the whole file, or isolate a singular spirit in a singular JSON file.
 * Automatic Travelling Spirit identification.
-  * This is based on several checks. 
+  * This is based on several checks.
 
 ## What's currently lacking:
 * Watercan should be able to process names + ID = this icon! So displayed spirit trees would closely mimick what is reflected ingame
@@ -90,3 +96,6 @@ This project is provided as-is under the MIT license.
 - Uses [GLFW](https://www.glfw.org/) for window management
 - JSON parsing via [nlohmann/json](https://github.com/nlohmann/json)
 - File dialogs by [nativefiledialog-extended](https://github.com/btzy/nativefiledialog-extended)
+
+## Disclaimer
+Watercan can absolutely give you a faulty file that will crash your clients if misused!
