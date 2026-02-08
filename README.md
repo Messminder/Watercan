@@ -79,9 +79,9 @@ Watercan expects JSON files with the following structure:
 - Root node (dep=0) is positioned at the bottom (south)
 - Child nodes branch upward (north)
 - Up to 3 children per node:
-  - 1 child: Directly above (straight trunk)
-  - 2 children: Split left and right
-  - 3 children: Left, center, right (full branch)
+  - 1 child: Directly above (straight tree trunk)
+  - 2 children: Split left and center (one leaf)
+  - 3 children: Left, center, right (two leaves)
 
 ## Controls
 
