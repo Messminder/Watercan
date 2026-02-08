@@ -3,6 +3,7 @@
 #include "spirit_tree.h"
 #include "tree_renderer.h"
 #include "video_player.h"
+#include "TextEditor.h"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,9 +93,11 @@ private:
     // JSON editor state
     uint64_t m_lastEditedNodeId = 0;
     int m_lastEditedSelectionCount = 0;
-    char m_jsonEditBuffer[8192] = "";
     bool m_jsonParseError = false;
     std::string m_jsonErrorMsg;
+
+    // Rich text editor (ImGuiColorTextEdit)
+    TextEditor m_textEditor;
 
     
     // Create mode state
@@ -138,6 +141,9 @@ private:
     // Link mode state
     bool m_linkMode = false;
     uint64_t m_linkSourceNodeId = TreeRenderer::NO_NODE_ID;  // The node being linked (will become child)
+
+    // Helper to complete a link operation to the given target (returns true on success)
+    bool performLinkToTarget(uint64_t targetId);
     
     // Delete confirmation state
     bool m_deleteConfirmMode = false;
@@ -171,6 +177,9 @@ private:
     bool m_reorderMode = false;
     uint64_t m_reorderNodeId = TreeRenderer::NO_NODE_ID; // the node for which we're reordering
     uint64_t m_reorderSelectedLeafId = TreeRenderer::NO_NODE_ID; // selected leaf to move
+
+    // Helper to perform a reorder insertion at a given child index and exit reorder mode
+    void performReorderInsert(size_t index);
 
     // Tools -> FNV1a32 Generator dialog
     bool m_showFNVDialog = false;

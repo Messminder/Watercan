@@ -14,11 +14,17 @@
 namespace Watercan {
 
 void TreeRenderer::updatePhysics(float deltaTime, const SpiritTree* tree) {
+    // Check if collisions are suppressed
+    if (m_collisionSuppressRemaining > 0.0f) {
+        m_collisionSuppressRemaining -= deltaTime;
+        if (m_collisionSuppressRemaining < 0.0f) m_collisionSuppressRemaining = 0.0f;
+    }
+
     // Track which nodes are currently in collision
     std::unordered_set<uint64_t> nodesInCollision;
     
-    // Apply collision forces between nodes
-    if (tree && !tree->nodes.empty()) {
+    // Apply collision forces between nodes (only if not suppressed)
+    if (m_collisionSuppressRemaining <= 0.0f && tree && !tree->nodes.empty()) {
         // Build list of node positions (base + offset)
         std::vector<std::pair<uint64_t, ImVec2>> nodePositions;
         for (const auto& node : tree->nodes) {
@@ -58,14 +64,14 @@ void TreeRenderer::updatePhysics(float deltaTime, const SpiritTree* tree) {
                     float pushForce = overlap * COLLISION_STRENGTH * deltaTime;
                     
                     // Don't push the node being dragged or frozen nodes
-                    if (!(idA == m_draggedNodeId && m_isDraggingNode) && !aFrozen) {
+                    if (!(idA == m_draggedNodeId && (m_isDraggingNode || m_isDraggingTree)) && !aFrozen) {
                         m_nodeOffsets[idA].x -= nx * pushForce * 0.5f;
                         m_nodeOffsets[idA].y -= ny * pushForce * 0.5f;
                         m_nodeVelocities[idA].x -= nx * pushForce * 2.0f;
                         m_nodeVelocities[idA].y -= ny * pushForce * 2.0f;
                     }
                     
-                    if (!(idB == m_draggedNodeId && m_isDraggingNode) && !bFrozen) {
+                    if (!(idB == m_draggedNodeId && (m_isDraggingNode || m_isDraggingTree)) && !bFrozen) {
                         m_nodeOffsets[idB].x += nx * pushForce * 0.5f;
                         m_nodeOffsets[idB].y += ny * pushForce * 0.5f;
                         m_nodeVelocities[idB].x += nx * pushForce * 2.0f;
@@ -79,7 +85,7 @@ void TreeRenderer::updatePhysics(float deltaTime, const SpiritTree* tree) {
     // Update collision time tracking and freeze nodes that have been oscillating too long
     for (auto& [nodeId, offset] : m_nodeOffsets) {
         // Skip dragged node
-        if (nodeId == m_draggedNodeId && m_isDraggingNode) {
+        if (nodeId == m_draggedNodeId && (m_isDraggingNode || m_isDraggingTree)) {
             m_collisionTime.erase(nodeId);
             m_frozenNodes.erase(nodeId);
             continue;
@@ -180,6 +186,25 @@ void TreeRenderer::applyBaseShift(uint64_t nodeId, float dx, float dy) {
     m_nodeVelocities[nodeId].y += -dy * 8.0f;
 }
 
+void TreeRenderer::thawNode(uint64_t nodeId) {
+    // Remove frozen/collision bookkeeping so the node is eligible for physics again
+    m_frozenNodes.erase(nodeId);
+    m_collisionTime.erase(nodeId);
+
+    // Ensure the node has a small velocity so the spring integrator wakes up and animates
+    auto it = m_nodeVelocities.find(nodeId);
+    if (it == m_nodeVelocities.end()) {
+        // Small upward nudge to make motion visible but gentle
+        m_nodeVelocities[nodeId] = ImVec2(0.08f, 0.08f);
+    } else {
+        // If velocity exists but near zero, nudge a bit
+        if (fabs(it->second.x) < 0.01f && fabs(it->second.y) < 0.01f) {
+            it->second.x = 0.08f;
+            it->second.y = 0.08f;
+        }
+    }
+} 
+
 ImVec2 TreeRenderer::getNodeOffset(uint64_t nodeId) const {
     auto it = m_nodeOffsets.find(nodeId);
     if (it != m_nodeOffsets.end()) {
@@ -205,7 +230,8 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                           uint64_t* outDragReleasedNodeId,
                           ImVec2* outDragFinalOffset,
                           uint64_t* outDraggingTreeNodeId,
-                          ImVec2* outDragTreeDelta) {
+                          ImVec2* outDragTreeDelta,
+                          bool reorderMode) {
     bool actionOccurred = false;
     // Store the provided type color map for use by getNodeColor/getNodeBorderColor
     m_currentRenderTypeColors = typeColors;
@@ -398,39 +424,44 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                         float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
                         if (outClickPos) { outClickPos->x = worldX; outClickPos->y = worldY; }
                     } else {
-                        // Single selection: clear others and select this node
-                        clearSelection();
-                        addNodeToSelection(clickedNode);
+                        // If the clicked node is already part of a multi-selection, keep the selection
+                        // and start a grouped node drag so all selected nodes move together.
+                        if (isNodeSelected(clickedNode) && m_selectedNodes.size() > 1) {
+                            float worldX = (mousePos.x - origin.x) / m_zoom;
+                            float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
 
-                        // Determine drag mode: free-floating nodes drag individually; regular nodes drag the whole tree
-                        float worldX = (mousePos.x - origin.x) / m_zoom;
-                        float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
-                        if (isFreeFloating(clickedNode)) {
+                            // Start node drag for the clicked node. The render loop will move other
+                            // selected nodes by the same mouse delta each frame.
                             m_draggedNodeId = clickedNode;
                             m_isDraggingNode = true;
+                            m_isDraggingTree = false;
 
-                            // Reset velocity when starting to drag
-                            m_nodeVelocities[clickedNode] = ImVec2(0.0f, 0.0f);
-
-                            // Compute grab offset so the node sticks to the cursor
-                            ImVec2 currentOffset = getNodeOffset(clickedNode);
-                            // Find base position of clicked node
+                            // Compute grab offset so the dragged node stays under the cursor
                             const SpiritNode* baseNode = nullptr;
                             for (const auto& n : tree->nodes) if (n.id == clickedNode) { baseNode = &n; break; }
                             if (baseNode) {
-                                m_dragGrabOffset.x = (baseNode->x + currentOffset.x) - worldX;
-                                m_dragGrabOffset.y = (baseNode->y + currentOffset.y) - worldY;
+                                m_dragGrabOffset.x = baseNode->x - worldX;
+                                m_dragGrabOffset.y = baseNode->y - worldY;
                             } else {
                                 m_dragGrabOffset = ImVec2(0.0f, 0.0f);
                             }
-                            if (outClickPos) {
-                                outClickPos->x = worldX;
-                                outClickPos->y = worldY;
-                            }
+
+                            // Mark this as a group drag so selected nodes are frozen/free-floating
+                            startGroupDrag(m_selectedNodes);
                         } else {
-                            // Start a tree drag: move the whole tree via pan so shape is preserved
+                            // Single selection: clear others and select this node
+                            clearSelection();
+                            addNodeToSelection(clickedNode);
+
+                            // Determine drag mode: free-floating nodes drag individually; regular nodes drag the whole tree
+                            float worldX = (mousePos.x - origin.x) / m_zoom;
+                            float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
+
+                            // Always start a tree drag (even for free-floating/unlinked nodes) so that
+                            // dragging an unlinked parent properly moves its entire subtree recursively.
                             m_draggedNodeId = clickedNode;
                             m_isDraggingTree = true;
+                            m_isDraggingNode = false;
                             // Compute grab between node base and mouse world coords
                             const SpiritNode* baseNode = nullptr;
                             for (const auto& n : tree->nodes) if (n.id == clickedNode) { baseNode = &n; break; }
@@ -444,8 +475,12 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                     }
                     actionOccurred = true;
                 } else {
-                    // Clicked empty space: deselect all nodes
-                    clearSelection();
+                    // Clicked empty space: start a potential box/marquee selection (do not immediately clear)
+                    ImVec2 mousePos = io.MousePos;
+                    m_isBoxSelecting = true;
+                    m_boxSelectStart = mousePos;
+                    m_boxSelectCurrent = mousePos;
+                    // Report click position in world coords for external handlers
                     float worldX = (mousePos.x - origin.x) / m_zoom;
                     float worldY = -(mousePos.y - origin.y) / m_zoom;  // Invert Y
                     if (outClickPos) { outClickPos->x = worldX; outClickPos->y = worldY; }
@@ -478,13 +513,18 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                             if (outDragTreeDelta) { outDragTreeDelta->x = dx; outDragTreeDelta->y = dy; }
                         }
                     } else {
-                        // Node drag (free-floating): stick node under cursor
+                        // Node drag (free-floating): stick node under cursor and move all selected nodes together
                         float worldX = (io.MousePos.x - origin.x) / m_zoom;
                         float worldY = -(io.MousePos.y - origin.y) / m_zoom;  // Invert Y
 
                         // Find base position for the dragged node
                         const SpiritNode* baseNode = nullptr;
                         for (const auto& n : tree->nodes) if (n.id == m_draggedNodeId) { baseNode = &n; break; }
+
+                        // Compute per-frame mouse delta in world space so other selected nodes follow
+                        ImVec2 worldDelta;
+                        worldDelta.x = io.MouseDelta.x / m_zoom;
+                        worldDelta.y = -io.MouseDelta.y / m_zoom;  // Invert Y
 
                         if (baseNode) {
                             // Maintain the grab offset so the node stays under the cursor
@@ -497,12 +537,18 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                             m_nodeVelocities[m_draggedNodeId] = ImVec2(0.0f, 0.0f);
                         } else {
                             // Fallback to delta-based behavior if the base node can't be found
-                            ImVec2 delta = io.MouseDelta;
-                            float worldDeltaX = delta.x / m_zoom;
-                            float worldDeltaY = -delta.y / m_zoom;  // Invert Y
                             ImVec2& offset = m_nodeOffsets[m_draggedNodeId];
-                            offset.x += worldDeltaX;
-                            offset.y += worldDeltaY;
+                            offset.x += worldDelta.x;
+                            offset.y += worldDelta.y;
+                        }
+
+                        // Move any other selected nodes by the same world delta so the group stays together
+                        for (uint64_t sid : m_selectedNodes) {
+                            if (sid == m_draggedNodeId) continue;
+                            ImVec2& off = m_nodeOffsets[sid];
+                            off.x += worldDelta.x;
+                            off.y += worldDelta.y;
+                            m_nodeVelocities[sid] = ImVec2(0.0f, 0.0f);
                         }
                     }
                 } else {
@@ -516,6 +562,8 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
                             // Do NOT erase offsets here; caller will commit base and then tell renderer to clear.
                         }
                     }
+
+
                     // End dragging state
                     m_isDraggingNode = false;
                     m_isDraggingTree = false;
@@ -580,6 +628,61 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
         drawNode(drawList, node, origin, m_zoom, isSelected);
     }
     
+    // Box-selection update & drawing
+    if (m_isBoxSelecting) {
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        m_boxSelectCurrent = mousePos;
+        float dx = m_boxSelectCurrent.x - m_boxSelectStart.x;
+        float dy = m_boxSelectCurrent.y - m_boxSelectStart.y;
+        float minX = std::min(m_boxSelectStart.x, m_boxSelectCurrent.x);
+        float maxX = std::max(m_boxSelectStart.x, m_boxSelectCurrent.x);
+        float minY = std::min(m_boxSelectStart.y, m_boxSelectCurrent.y);
+        float maxY = std::max(m_boxSelectStart.y, m_boxSelectCurrent.y);
+
+        // If the drag is substantial, compute which nodes are inside the rect
+        if (std::fabs(dx) > BOX_SELECT_MIN_DRAG || std::fabs(dy) > BOX_SELECT_MIN_DRAG) {
+            m_boxSelectedNodes.clear();
+            for (const auto& n : tree->nodes) {
+                ImVec2 pos;
+                if (!getNodeScreenPosition(tree, n.id, &pos)) continue;
+                if (pos.x >= minX && pos.x <= maxX && pos.y >= minY && pos.y <= maxY) {
+                    if (m_selectableNodes.empty() || m_selectableNodes.count(n.id) > 0) {
+                        m_boxSelectedNodes.insert(n.id);
+                    }
+                }
+            }
+        } else {
+            m_boxSelectedNodes.clear();
+        }
+
+        // Draw rectangle (filled & border)
+        drawList->AddRectFilled(ImVec2(minX, minY), ImVec2(maxX, maxY), IM_COL32(80,150,255,50));
+        drawList->AddRect(ImVec2(minX, minY), ImVec2(maxX, maxY), IM_COL32(80,150,255,180), 0, 0, 2.0f);
+    }
+
+    // Finalize box selection when user releases the left mouse button
+    if (m_isBoxSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        ImGuiIO& ioLocal = ImGui::GetIO();
+        float dx = m_boxSelectCurrent.x - m_boxSelectStart.x;
+        float dy = m_boxSelectCurrent.y - m_boxSelectStart.y;
+        bool smallDrag = (std::fabs(dx) <= BOX_SELECT_MIN_DRAG && std::fabs(dy) <= BOX_SELECT_MIN_DRAG);
+
+        if (smallDrag) {
+            // Treat as a simple click on empty space: clear selection
+            clearSelection();
+        } else {
+            bool shift = ioLocal.KeyShift;
+            if (!shift) clearSelection();
+            for (uint64_t id : m_boxSelectedNodes) {
+                addNodeToSelection(id);
+            }
+        }
+
+        // Clear box selection state
+        clearBoxSelection();
+        actionOccurred = true;
+    }
+
     // Draw border
     drawList->AddRect(canvasPos, 
                      ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
@@ -623,6 +726,26 @@ bool TreeRenderer::render(const SpiritTree* tree, bool createMode, ImVec2* outCl
         drawList->AddRect(canvasPos, 
                          ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
                          IM_COL32(100, 150, 255, 255), 0.0f, 0, 2.0f);
+    }
+    
+    // Draw reorder mode overlay
+    if (reorderMode) {
+        // Dim the canvas slightly
+        drawList->AddRectFilled(canvasPos,
+                               ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
+                               IM_COL32(0, 0, 0, 100));
+        
+        // Draw instruction text
+        const char* text = "Select a node to reorder";
+        ImVec2 textSize = ImGui::CalcTextSize(text);
+        ImVec2 textPos(canvasPos.x + (canvasSize.x - textSize.x) * 0.5f,
+                       canvasPos.y + canvasSize.y * 0.3f);
+        drawList->AddText(textPos, IM_COL32(255, 255, 200, 255), text); // Slight yellow tint
+
+        // Draw border in yellow to indicate reorder mode
+        drawList->AddRect(canvasPos, 
+                         ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
+                         IM_COL32(255, 220, 80, 255), 0.0f, 0, 2.0f);
     }
     
     // Draw delete confirmation overlay (but skip if readOnlyPreview requested)
@@ -806,6 +929,45 @@ ImU32 TreeRenderer::getNodeFillColorForNode(const SpiritNode& node) const {
     return getNodeColor(node);
 }
 
+void TreeRenderer::startGroupDrag(const std::unordered_set<uint64_t>& nodes) {
+    if (m_groupDragging) return;
+    m_groupDragging = true;
+    m_groupAddedFreeFloating.clear();
+    m_groupAddedFrozen.clear();
+    // Freeze and mark as free-floating so they remain stiff during the drag
+    for (uint64_t id : nodes) {
+        bool wasFree = (m_freeFloatingNodes.count(id) > 0);
+        if (!wasFree) {
+            m_freeFloatingNodes.insert(id);
+            m_groupAddedFreeFloating.insert(id);
+        }
+        bool wasFrozen = (m_frozenNodes.count(id) > 0);
+        if (!wasFrozen) {
+            m_frozenNodes.insert(id);
+            m_groupAddedFrozen.insert(id);
+        }
+        m_collisionTime.erase(id);
+    }
+}
+
+void TreeRenderer::endGroupDrag() {
+    if (!m_groupDragging) return;
+    m_groupDragging = false;
+    // Undo only the changes we made in startGroupDrag
+    for (uint64_t id : m_groupAddedFreeFloating) m_freeFloatingNodes.erase(id);
+    for (uint64_t id : m_groupAddedFrozen) m_frozenNodes.erase(id);
+    m_groupAddedFreeFloating.clear();
+    m_groupAddedFrozen.clear();
+    // Give a brief global collision suppression so nodes can settle without immediate pushes
+    suppressCollisions(1.0f);
+}
+
+std::vector<TreeRenderer::SnapEvent> TreeRenderer::popPendingSnaps() {
+    std::vector<SnapEvent> out = std::move(m_pendingSnaps);
+    m_pendingSnaps.clear();
+    return out;
+}
+
 void TreeRenderer::startDeleteAnimation(uint64_t nodeId, float worldX, float worldY, ImU32 fillColor) {
     // Compute screen position for the node's world coords
     ImVec2 origin;
@@ -882,9 +1044,13 @@ void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node,
     bool idMismatch = (node.id != expectedId);
 
     if (externallyHighlighted) {
-        // Draw a soft highlight ring behind the node
-        ImU32 halo = IM_COL32(255, 220, 80, 64);
-        drawList->AddCircleFilled(screenPos, radius * 1.15f, halo);
+        // Draw a soft highlight ring behind the node with pulsing effect
+        float time = (float)ImGui::GetTime();
+        float pulse = (sinf(time * 5.0f) + 1.0f) * 0.5f; // 0.0 to 1.0
+        float alpha = 0.3f + 0.5f * pulse; // 0.3 to 0.8
+        ImU32 halo = IM_COL32(255, 220, 80, (int)(alpha * 255.0f));
+        drawList->AddCircleFilled(screenPos, radius * 1.4f, halo); // Increased radius for visibility
+        drawList->AddCircle(screenPos, radius * 1.4f, IM_COL32(255, 220, 80, (int)((alpha + 0.2f) * 255.0f)), 0, 2.0f);
     }
     
     // Get colors
@@ -896,6 +1062,12 @@ void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node,
         float selectionRadius = radius + 6.0f * zoom;
         ImU32 selectionColor = idMismatch ? IM_COL32(255, 50, 50, 255) : IM_COL32(50, 255, 50, 255);
         drawList->AddCircle(screenPos, selectionRadius, selectionColor, 0, 3.0f * zoom);
+    }
+
+    // Box-selection highlight (when user is drawing a marquee) - show a blue ring for nodes inside the box
+    if (m_boxSelectedNodes.count(node.id) > 0 && !isSelected) {
+        float boxRadius = radius + 6.0f * zoom;
+        drawList->AddCircle(screenPos, boxRadius, IM_COL32(100,150,255,200), 0, 2.0f * zoom);
     }
     
     // Draw node circle with shadow
@@ -1074,14 +1246,42 @@ void TreeRenderer::drawConnection(ImDrawList* drawList, const SpiritNode& parent
     ctrl1.x = ctrl1.x * (1.0f - blend) + origCtrl1.x * blend;
     ctrl1.y = ctrl1.y * (1.0f - blend) + origCtrl1.y * blend;
     
-    // Classification: determine whether this connection is the main trunk (vertical
-    // child above parent) or a NW/NE leaf (diagonal left/right and a leaf node).
-    float horizDelta = child.x - parent.x; // world coords
-    const float trunkThreshold = 30.0f; // small horizontal tolerance for trunk
-    const float leafThreshold = 40.0f;  // threshold to consider NW/NE
-    bool isTrunk = (std::fabs(horizDelta) <= trunkThreshold);
-    bool isLeafNW = (child.children.empty() && horizDelta < -leafThreshold);
-    bool isLeafNE = (child.children.empty() && horizDelta > leafThreshold);
+    // Classification: determine whether this connection is the main trunk (N)
+    // or a NW/NE leaf based on the child's cardinal slot relative to its parent.
+    // Fallback to angle heuristic if child is not found in parent's children list.
+    size_t childCount = parent.children.size();
+    bool isTrunk = false;
+    bool isLeafNW = false;
+    bool isLeafNE = false;
+
+    // Find index of child within parent's children vector
+    size_t childIdx = SIZE_MAX;
+    for (size_t i = 0; i < childCount; ++i) {
+        if (parent.children[i] == child.id) { childIdx = i; break; }
+    }
+
+    if (childIdx != SIZE_MAX) {
+        if (childCount == 1) {
+            isTrunk = true;
+        } else if (childCount == 2) {
+            // index 0 => NW (leaf), index 1 => N (trunk)
+            isLeafNW = (childIdx == 0);
+            isTrunk = (childIdx == 1);
+        } else {
+            // >=3: index 0 => NW, index 1 => N (trunk), last index => NE
+            isLeafNW = (childIdx == 0);
+            isTrunk = (childIdx == 1);
+            isLeafNE = (childIdx == childCount - 1);
+        }
+    } else {
+        // Fallback heuristic: use angle to classify (keeps backward compatibility)
+        float horizDelta = child.x - parent.x; // world coords
+        const float trunkThreshold = 30.0f; // small horizontal tolerance for trunk
+        const float leafThreshold = 40.0f;  // threshold to consider NW/NE
+        isTrunk = (std::fabs(horizDelta) <= trunkThreshold);
+        isLeafNW = (horizDelta < -leafThreshold);
+        isLeafNE = (horizDelta > leafThreshold);
+    }
 
     // Choose base colors for special cases (alpha follows previous value)
     ImU32 trunkColor = IM_COL32(255, 220, 100, 200); // gold
@@ -1106,6 +1306,57 @@ void TreeRenderer::drawConnection(ImDrawList* drawList, const SpiritNode& parent
         int lg = (int)(255 - 10.0f * tensionFactor);
         int lb = (int)(50 - 10.0f * tensionFactor);
         lineColor = IM_COL32(lr, lg, lb, 200);
+    }
+
+    // Snapping visualization: color shifts to red when stretched beyond a threshold
+    // Distances are measured using the nodes' visual positions (base + transient offsets)
+    // Increased thresholds so snapping requires a much larger stretch
+    const float SNAP_WARNING_DIST = 240.0f; // start blending toward red (world units)
+    const float SNAP_DIST = 420.0f; // when exceeded, begin snap timer
+    const float SNAP_HOLD = 0.12f; // seconds beyond SNAP_DIST to trigger snap
+
+    // Compute world-space distance using current offsets (so dragging affects it)
+    float worldDx = (child.x + childOffset.x) - (parent.x + parentOffset.x);
+    float worldDy = (child.y + childOffset.y) - (parent.y + parentOffset.y);
+    float worldDist = sqrtf(worldDx * worldDx + worldDy * worldDy);
+
+    float warnRatio = 0.0f;
+    if (worldDist > SNAP_WARNING_DIST) warnRatio = std::clamp((worldDist - SNAP_WARNING_DIST) / (SNAP_DIST - SNAP_WARNING_DIST), 0.0f, 1.0f);
+
+    if (warnRatio > 0.0f) {
+        // Blend lineColor toward red based on warnRatio
+        auto blendColor = [&](ImU32 a, ImU32 b, float t) -> ImU32 {
+            int ar = (a >> IM_COL32_R_SHIFT) & 0xFF;
+            int ag = (a >> IM_COL32_G_SHIFT) & 0xFF;
+            int ab = (a >> IM_COL32_B_SHIFT) & 0xFF;
+            int aa = (a >> IM_COL32_A_SHIFT) & 0xFF;
+            int br = (b >> IM_COL32_R_SHIFT) & 0xFF;
+            int bg = (b >> IM_COL32_G_SHIFT) & 0xFF;
+            int bb = (b >> IM_COL32_B_SHIFT) & 0xFF;
+            int ba = (b >> IM_COL32_A_SHIFT) & 0xFF;
+            int r = (int)(ar * (1.0f - t) + br * t);
+            int g = (int)(ag * (1.0f - t) + bg * t);
+            int bl = (int)(ab * (1.0f - t) + bb * t);
+            int al = (int)(aa * (1.0f - t) + ba * t);
+            return IM_COL32(r, g, bl, al);
+        };
+        ImU32 red = IM_COL32(255, 80, 80, 200);
+        lineColor = blendColor(lineColor, red, warnRatio);
+    }
+
+    // Track snap timers when beyond SNAP_DIST
+    uint64_t key = (parent.id << 32) ^ (child.id & 0xFFFFFFFFULL);
+    if (worldDist >= SNAP_DIST) {
+        float dt = ImGui::GetIO().DeltaTime;
+        m_snapTimers[key] += dt;
+        if (m_snapTimers[key] >= SNAP_HOLD) {
+            // Queue a snap event and clear timer to avoid repeat
+            m_pendingSnaps.push_back({parent.id, child.id});
+            m_snapTimers.erase(key);
+        }
+    } else {
+        // Not beyond snap distance: reset any timer
+        m_snapTimers.erase(key);
     }
 
     // Thickness can increase slightly when stretched

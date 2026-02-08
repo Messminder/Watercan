@@ -36,7 +36,9 @@ public:
                 // dragged, the renderer will set outDraggingTreeNodeId to the dragged node ID
                 // and outDragTreeDelta to the per-frame delta to apply to the whole tree base.
                 uint64_t* outDraggingTreeNodeId = nullptr,
-                ImVec2* outDragTreeDelta = nullptr);
+                ImVec2* outDragTreeDelta = nullptr,
+                // Reorder mode: shows overlay and highlight for reordering
+                bool reorderMode = false);
     
     // Update physics (call each frame for spring simulation)
     // Pass the current tree for collision detection between nodes
@@ -90,6 +92,9 @@ public:
     void setFreeFloating(uint64_t nodeId) { m_freeFloatingNodes.insert(nodeId); }
     void clearFreeFloating(uint64_t nodeId) { m_freeFloatingNodes.erase(nodeId); }
     bool isFreeFloating(uint64_t nodeId) const { return m_freeFloatingNodes.count(nodeId) > 0; }
+
+    // Thaw a node so it participates in physics again (clears frozen/collision state and nudges velocity)
+    void thawNode(uint64_t nodeId);
 
     // Deletion animation: start an animated 'split & fall & fade' for a node that's
     // about to be deleted. worldX/worldY are node coordinates in world space.
@@ -192,6 +197,16 @@ private:
     // Selectable nodes (when non-empty, only these nodes may be selected)
     std::unordered_set<uint64_t> m_selectableNodes;
 
+    // Box selection state (allow users to draw a marquee to select nodes)
+    bool m_isBoxSelecting = false;
+    ImVec2 m_boxSelectStart = ImVec2(0.0f, 0.0f);
+    ImVec2 m_boxSelectCurrent = ImVec2(0.0f, 0.0f);
+    std::unordered_set<uint64_t> m_boxSelectedNodes;
+    static constexpr float BOX_SELECT_MIN_DRAG = 4.0f;
+
+    // Helper to clear box selection state
+    void clearBoxSelection() { m_isBoxSelecting = false; m_boxSelectedNodes.clear(); }
+
     // Arrow visibility state
     bool m_showArrows = true;
 public:
@@ -205,10 +220,30 @@ public:
     // Suppress collisions for a given amount of seconds (used after reorder)
     void suppressCollisions(float seconds) { m_collisionSuppressRemaining = std::max(m_collisionSuppressRemaining, seconds); m_collisionTime.clear(); m_frozenNodes.clear(); }
 
-    // Arrow visibility
+    // Group drag helpers: when multiple nodes are dragged together we temporarily
+    // freeze and mark them free-floating so they stay locked together until release.
+    void startGroupDrag(const std::unordered_set<uint64_t>& nodes);
+    void endGroupDrag();
+
+    // Snapping: detect stretched links and produce snap events for the app to commit
+    // The renderer will color the line progressively and queue a pending snap when
+    // the stretch holds beyond a threshold.
+    struct SnapEvent { uint64_t parentId; uint64_t childId; };
+    std::vector<SnapEvent> popPendingSnaps();
+
+    // Arrow visibility (kept public so App can toggle)
     void setShowArrows(bool s) { m_showArrows = s; }
     void toggleShowArrows() { m_showArrows = !m_showArrows; }
     bool showArrows() const { return m_showArrows; }
+
+private:
+    bool m_groupDragging = false; // true while a multi-node grouped drag is in progress
+    std::unordered_set<uint64_t> m_groupAddedFreeFloating; // nodes that were made free-floating by startGroupDrag
+    std::unordered_set<uint64_t> m_groupAddedFrozen; // nodes that were frozen by startGroupDrag
+
+    // Snap tracking
+    std::unordered_map<uint64_t, float> m_snapTimers; // key -> seconds held beyond threshold
+    std::vector<SnapEvent> m_pendingSnaps;
 
     // Get the screen position (in pixels) of the node's center, return false if node not found
     bool getNodeScreenPosition(const SpiritTree* tree, uint64_t nodeId, ImVec2* outPos) const;

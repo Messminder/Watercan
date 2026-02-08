@@ -116,7 +116,22 @@ public:
     bool reshapeTreeAndCollectShifts(const std::string& spiritName,
                                      std::unordered_map<uint64_t, std::pair<float,float>>* outShifts);
 
-    // Determine whether the tree's current base positions differ from the computed
+    // Record and restore snaps so detached children can be reattached on Reshape
+    void recordSnap(const std::string& spiritName, uint64_t childId, uint64_t oldParentId);
+    // Restore snaps and return list of node ids that were reattached
+    std::vector<uint64_t> restoreSnaps(const std::string& spiritName);
+    bool hasSnaps(const std::string& spiritName) const;
+    // Return true if the given spirit has pending snapped children recorded
+    bool hasSnapsInternal(const std::string& spiritName) const;
+
+    // Clear any recorded snap data for a given child in a spirit (used when user manually re-links)
+    void clearSnap(const std::string& spiritName, uint64_t childId);
+
+public:
+    // Map of snapped child -> original parent id (persistent until restored)
+    std::unordered_map<uint64_t, uint64_t> m_snappedParents;
+    // Per-tree list of snapped child ids (helps quickly check if a spirit has snaps)
+    std::unordered_map<std::string, std::vector<uint64_t>> m_perTreeSnaps;
     // layout positions (within a small epsilon). Used to enable/disable the Reshape button.
     bool needsReshape(const std::string& spiritName, float epsilon = 0.1f);
 

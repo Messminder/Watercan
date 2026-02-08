@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # Workaround for older CMake min versions in dependencies
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "")
 
-project(Watercan VERSION 1.5.7 LANGUAGES CXX C)
+project(Watercan VERSION 1.5.8 LANGUAGES CXX C)
 
 # Build option: attempt a single-binary build by preferring static libs where possible.
 # This is a best-effort option: OpenGL (libGL) will remain dynamic to preserve compatibility.
@@ -126,6 +126,7 @@ add_executable(Watercan
     src/stb_image_impl.cpp
     src/app_type_colors.cpp
     src/video_player.cpp
+    src/TextEditor.cpp
 )
 
 target_include_directories(Watercan PRIVATE 

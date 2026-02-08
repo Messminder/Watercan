@@ -276,12 +276,7 @@ void SpiritTreeManager::buildTree(SpiritTree& tree) {
         }
     }
     
-    // Limit children to max 3 as per spec
-    for (auto& node : tree.nodes) {
-        if (node.children.size() > 3) {
-            node.children.resize(3);
-        }
-    }
+
 }
 
 void SpiritTreeManager::computeLayout(SpiritTree& tree) {
@@ -332,28 +327,23 @@ void SpiritTreeManager::layoutSubtree(SpiritTree& tree, SpiritNode& node, float 
     const float nodeSpacingX = 120.0f;  // Horizontal spacing for branches
     
     size_t childCount = node.children.size();
-    
-    for (size_t i = 0; i < childCount && i < 3; ++i) {
+
+    // Compute positions for any number of children. For 1-3 children preserve the
+    // original aesthetic (NW,N,NE). For >3 distribute evenly centered over parent.
+    const float diagonalYOffset = -25.0f;  // NW/NE nodes are slightly lower
+
+    for (size_t i = 0; i < childCount; ++i) {
         auto it = idToNode.find(node.children[i]);
         if (it == idToNode.end()) continue;
-        
+
         SpiritNode* child = it->second;
         float childX = x;
         float childY = y + nodeSpacingY;  // Move up (north)
-        
-        // Position based on dependency order:
-        // First dep (i=0): North-West (left)
-        // Second dep (i=1): North (center/directly above)
-        // Third dep (i=2): North-East (right)
-        // NW and NE are slightly lower than N (center)
-        
-        const float diagonalYOffset = -25.0f;  // NW/NE nodes are slightly lower
-        
+
         if (childCount == 1) {
-            // Single child goes directly above (trunk)
             childX = x;
         } else if (childCount == 2) {
-            // Two children: first goes left, second goes directly above
+            // Keep original two-child look: left + center
             if (i == 0) {
                 childX = x - nodeSpacingX;  // North-West
                 childY += diagonalYOffset;  // Slightly lower
@@ -361,7 +351,7 @@ void SpiritTreeManager::layoutSubtree(SpiritTree& tree, SpiritNode& node, float 
                 childX = x;  // North (directly above)
             }
         } else if (childCount == 3) {
-            // Three children: left, center, right
+            // Original three-child layout
             if (i == 0) {
                 childX = x - nodeSpacingX;  // North-West
                 childY += diagonalYOffset;  // Slightly lower
@@ -371,8 +361,15 @@ void SpiritTreeManager::layoutSubtree(SpiritTree& tree, SpiritNode& node, float 
                 childX = x + nodeSpacingX;  // North-East
                 childY += diagonalYOffset;  // Slightly lower
             }
+        } else {
+            // Distribute children evenly centered above the parent for >3 children
+            float startX = x - nodeSpacingX * (float(childCount - 1) * 0.5f);
+            childX = startX + (float)i * nodeSpacingX;
+            // Slightly lower for non-center children to preserve visual grouping
+            float centerIndex = (childCount - 1) * 0.5f;
+            if (std::fabs((float)i - centerIndex) > 0.01f) childY += diagonalYOffset;
         }
-        
+
         layoutSubtree(tree, *child, childX, childY, depth + 1);
     }
 }
@@ -686,9 +683,14 @@ bool SpiritTreeManager::reshapeTreeAndCollectShifts(const std::string& spiritNam
 }
 
 bool SpiritTreeManager::needsReshape(const std::string& spiritName, float epsilon) {
+    // If the spirit name is empty, nothing to do
     auto it = m_trees.find(spiritName);
     if (it == m_trees.end()) return false;
     const SpiritTree& tree = it->second;
+
+    // If there are snapped nodes recorded for this spirit, we consider reshape necessary
+    auto pit = m_perTreeSnaps.find(spiritName);
+    if (pit != m_perTreeSnaps.end() && !pit->second.empty()) return true;
 
     // Make a copy and recompute positions using layoutSubtree on each root without mutating the real tree
     SpiritTree tmp = tree;
@@ -756,16 +758,16 @@ void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64
     const float diagonalYOffset = -25.0f;
     
     size_t childCount = parent->children.size();
-    
+
     // Reposition ALL children of this parent according to the layout rules
-    for (size_t i = 0; i < childCount && i < 3; ++i) {
+    for (size_t i = 0; i < childCount; ++i) {
         auto childIt = idToNode.find(parent->children[i]);
         if (childIt == idToNode.end()) continue;
-        
+
         SpiritNode* child = childIt->second;
         float x = parent->x;
         float y = parent->y + nodeSpacingY;
-        
+
         // Position based on child index (same logic as layoutSubtree)
         if (childCount == 1) {
             x = parent->x;  // Directly above (N)
@@ -776,7 +778,7 @@ void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64
             } else {
                 x = parent->x;  // N
             }
-        } else if (childCount >= 3) {
+        } else if (childCount == 3) {
             if (i == 0) {
                 x = parent->x - nodeSpacingX;  // NW
                 y += diagonalYOffset;
@@ -786,8 +788,14 @@ void SpiritTreeManager::positionLinkedNode(const std::string& spiritName, uint64
                 x = parent->x + nodeSpacingX;  // NE
                 y += diagonalYOffset;
             }
+        } else {
+            // Distribute children evenly centered above the parent for >3 children
+            float startX = parent->x - nodeSpacingX * (float(childCount - 1) * 0.5f);
+            x = startX + (float)i * nodeSpacingX;
+            float centerIndex = (childCount - 1) * 0.5f;
+            if (std::fabs((float)i - centerIndex) > 0.01f) y += diagonalYOffset;
         }
-        
+
         // If caller requested, record the visual shift (oldBase - newBase) so the renderer can
         // apply an immediate offset that will be springed back to zero (producing a smooth motion)
         if (outShifts) {
@@ -943,6 +951,101 @@ bool SpiritTreeManager::deleteNode(const std::string& spiritName, uint64_t nodeI
     
     return true;
 }
+
+void SpiritTreeManager::recordSnap(const std::string& spiritName, uint64_t childId, uint64_t oldParentId) {
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return;
+    // Keep map per-manager; simply record mapping child->oldParent (only if child exists in this spirit)
+    SpiritTree& tree = it->second;
+    bool found = false;
+    for (const auto& n : tree.nodes) if (n.id == childId) { found = true; break; }
+    if (found) {
+        m_snappedParents[childId] = oldParentId;
+        // Also persist the mapping inside the per-tree structure in case the app needs to query it
+        // We use a simple approach: ensure we have a map inside SpiritTree to reference on reshape.
+        auto &vec = m_perTreeSnaps[spiritName];
+        if (std::find(vec.begin(), vec.end(), childId) == vec.end()) vec.push_back(childId);
+    }
+}
+
+void SpiritTreeManager::clearSnap(const std::string& spiritName, uint64_t childId) {
+    // Remove global mapping if present
+    auto it = m_snappedParents.find(childId);
+    if (it != m_snappedParents.end()) m_snappedParents.erase(it);
+
+    // Remove from per-tree list
+    auto pit = m_perTreeSnaps.find(spiritName);
+    if (pit != m_perTreeSnaps.end()) {
+        auto &vec = pit->second;
+        vec.erase(std::remove(vec.begin(), vec.end(), childId), vec.end());
+        if (vec.empty()) m_perTreeSnaps.erase(pit);
+    }
+}
+std::vector<uint64_t> SpiritTreeManager::restoreSnaps(const std::string& spiritName) {
+    std::vector<uint64_t> restored;
+    if (spiritName.empty()) return restored;
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return restored;
+    SpiritTree& tree = it->second;
+
+    // Build id->node map
+    std::unordered_map<uint64_t, SpiritNode*> idToNode;
+    for (auto& n : tree.nodes) idToNode[n.id] = &n;
+
+    // Reattach any snapped nodes if their original parent still exists
+    std::vector<uint64_t> toErase;
+    for (auto itKv = m_snappedParents.begin(); itKv != m_snappedParents.end(); ) {
+        uint64_t childId = itKv->first;
+        uint64_t oldParent = itKv->second;
+        auto itChild = idToNode.find(childId);
+        auto itParent = idToNode.find(oldParent);
+        if (itChild != idToNode.end() && itParent != idToNode.end()) {
+            itChild->second->dep = oldParent;
+            toErase.push_back(childId);
+            restored.push_back(childId);
+            itKv = m_snappedParents.erase(itKv);
+            // remove from per-tree snaps list
+            auto &vec = m_perTreeSnaps[spiritName];
+            vec.erase(std::remove(vec.begin(), vec.end(), childId), vec.end());
+        } else {
+            ++itKv;
+        }
+    }
+
+    // Rebuild tree relationships if we restored any nodes so subsequent layout calls
+    // operate on the full tree structure
+    if (!toErase.empty()) rebuildTree(spiritName);
+
+    // Additionally, if any snaps remain (children detached but their parent missing),
+    // keep the reshape button enabled so the user can Restore once file state is consistent.
+
+    // Also, if snapped nodes remain detached from this spirit, keep them recorded in per-tree list
+    // so the UI can know about them; we already maintain m_perTreeSnaps for that purpose.
+
+    return restored;
+}
+
+bool SpiritTreeManager::hasSnapsInternal(const std::string& spiritName) const {
+    auto it = m_perTreeSnaps.find(spiritName);
+    if (it == m_perTreeSnaps.end()) return false;
+    return !it->second.empty();
+}
+
+bool SpiritTreeManager::hasSnaps(const std::string& spiritName) const {
+    // Check per-tree list for snaps first
+    if (hasSnapsInternal(spiritName)) return true;
+    // Fallback: check global map for any child ids that belong to this spirit
+    auto it = m_trees.find(spiritName);
+    if (it == m_trees.end()) return false;
+    const SpiritTree& tree = it->second;
+    std::unordered_set<uint64_t> ids;
+    for (const auto& n : tree.nodes) ids.insert(n.id);
+    for (const auto &kv : m_snappedParents) {
+        if (ids.count(kv.first)) return true;
+    }
+    return false;
+}
+
 
 bool SpiritTreeManager::moveNode(const std::string& fromSpirit, const std::string& toSpirit, uint64_t nodeId) {
     if (fromSpirit == toSpirit) return true; // nothing to do
