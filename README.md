@@ -28,6 +28,16 @@ Further knowledge gathering is requiered to support spirits from Season of Migra
 * Automatic Travelling Spirit identification.
   * This is based on several checks.
 
+## Screenshots
+
+![Tree Editor - Overview](media/Screenshot%20From%202026-02-08%2000-49-50.png "Tree Editor - Overview")
+
+*Overview of the tree editor showing nodes, physics and relationship lines.*
+
+![Restore Flow Animation](media/Screenshot%20From%202026-02-08%2000-50-46.png "Restore Flow Animation")
+
+*Restore confirmation and delete animation example.*
+
 ## What's currently lacking:
 * Watercan should be able to process names + ID = this icon! So displayed spirit trees would closely mimick what is reflected ingame
 
