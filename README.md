@@ -105,7 +105,6 @@ This project is provided as-is under the MIT license.
 - Built with [Dear ImGui](https://github.com/ocornut/imgui)
 - Uses [GLFW](https://www.glfw.org/) for window management
 - JSON parsing via [nlohmann/json](https://github.com/nlohmann/json)
-- File dialogs by [nativefiledialog-extended](https://github.com/btzy/nativefiledialog-extended)
 
 ## Disclaimer
 Watercan can absolutely give you a faulty file that will crash your clients if you misuse it!
