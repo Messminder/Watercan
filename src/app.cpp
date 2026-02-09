@@ -1601,9 +1601,35 @@ void App::renderUI() {
 
     // Make the About dialog size responsive to display size so it looks correct on HiDPI and varied desktop setups
     ImGuiIO& io = ImGui::GetIO();
-    // Slightly wider and a bit less tall than before for better visual balance
-    float winW = std::clamp(io.DisplaySize.x * 0.70f, 480.0f, 1100.0f);
-    float winH = std::clamp(io.DisplaySize.y * 0.50f, 260.0f, 760.0f);
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImFont* font = ImGui::GetFont();
+    float fontH = ImGui::GetFontSize();
+    float pad = style.WindowPadding.x;
+
+    // Measure key text widths so the dialog is wide enough to show all text without wrapping
+    std::string title = std::string("Watercan ") + WATERCAN_VERSION + " - Vibecoded by Dusk//Night with Copilot wheelchair assistance";
+    float titleW = ImGui::CalcTextSize(title.c_str()).x;
+    float desc1W = ImGui::CalcTextSize("JSON-based dependency tree viewer and editor specialized for Sky: Children of the Light").x;
+    float desc2W = ImGui::CalcTextSize("For use with private servers and their communities.").x;
+    float shellW = ImGui::CalcTextSize("This release of Watercan has been given the symbolic name of 'Shell'!").x;
+    float textMaxW = std::max(std::max(titleW, desc1W), std::max(desc2W, shellW));
+
+    // Account for the image width (scaled for HiDPI) if present
+    float imgW = 0.0f;
+    if (m_aboutImageTexture) {
+        ImVec2 fbScale = io.DisplayFramebufferScale;
+        imgW = (float)m_aboutImageWidth / (fbScale.x > 0.0f ? fbScale.x : 1.0f);
+    }
+
+    // Desired width: enough for image + text + padding, but not exceeding 95% of display
+    float desiredW = std::min(io.DisplaySize.x * 0.95f, std::max(textMaxW + imgW + pad * 6.0f, 540.0f));
+    float winW = std::clamp(desiredW, 480.0f, io.DisplaySize.x * 0.95f);
+
+    // Ensure height is at least enough for several lines of text plus the button row so Close/License are always visible
+    float minHeight = fontH * 8.0f + ImGui::GetFrameHeight() + pad * 4.0f;
+    float desiredH = std::clamp(io.DisplaySize.y * 0.5f, minHeight, io.DisplaySize.y * 0.9f);
+    float winH = desiredH;
+
     ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_FirstUseEver);
     if (ImGui::BeginPopupModal("About Watercan", nullptr, ImGuiWindowFlags_NoResize)) {
         ImGui::Text("Watercan %s - Vibecoded by Dusk//Night with Copilot wheelchair assistance", WATERCAN_VERSION);
@@ -1798,6 +1824,11 @@ void App::renderUI() {
                 // Timeline
                 double dur = m_musicPlayer.getDurationSeconds();
                 double pos = m_musicPlayer.getPositionSeconds();
+                // If playback naturally reached the end, reset timeline to start
+                if (dur > 0.0 && pos >= dur - 0.05) {
+                    m_musicPlayer.stop();
+                    pos = 0.0;
+                }
                 float frac = (dur > 0.0) ? (float)(pos / dur) : 0.0f;
 
                 ImGui::Spacing();
