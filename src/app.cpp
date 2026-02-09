@@ -1599,7 +1599,12 @@ void App::renderUI() {
         ImGui::EndPopup();
     }
 
-    ImGui::SetNextWindowSize(ImVec2(750, 550), ImGuiCond_FirstUseEver);
+    // Make the About dialog size responsive to display size so it looks correct on HiDPI and varied desktop setups
+    ImGuiIO& io = ImGui::GetIO();
+    // Slightly wider and a bit less tall than before for better visual balance
+    float winW = std::clamp(io.DisplaySize.x * 0.70f, 480.0f, 1100.0f);
+    float winH = std::clamp(io.DisplaySize.y * 0.50f, 260.0f, 760.0f);
+    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_FirstUseEver);
     if (ImGui::BeginPopupModal("About Watercan", nullptr, ImGuiWindowFlags_NoResize)) {
         ImGui::Text("Watercan %s - Vibecoded by Dusk//Night with Copilot wheelchair assistance", WATERCAN_VERSION);
         ImGui::Separator();
@@ -1607,11 +1612,23 @@ void App::renderUI() {
         
         // Display the About image with text beside it
         if (m_aboutImageTexture) {
-            ImGui::Image((ImTextureID)(intptr_t)m_aboutImageTexture, 
-                         ImVec2((float)m_aboutImageWidth, (float)m_aboutImageHeight));
-            
+            // Account for framebuffer scaling (HiDPI) so image appears at intended physical size
+            ImGuiIO& io = ImGui::GetIO();
+            ImVec2 fbScale = io.DisplayFramebufferScale;
+            float displayW = (float)m_aboutImageWidth / (fbScale.x > 0.0f ? fbScale.x : 1.0f);
+            float displayH = (float)m_aboutImageHeight / (fbScale.y > 0.0f ? fbScale.y : 1.0f);
+            // Constrain image to a reasonable portion of the dialog width
+            float availW = ImGui::GetContentRegionAvail().x;
+            float maxW = std::max(120.0f, availW * 0.45f);
+            if (displayW > maxW) {
+                float r = maxW / displayW;
+                displayW *= r; displayH *= r;
+            }
+
+            ImGui::Image((ImTextureID)(intptr_t)m_aboutImageTexture, ImVec2(displayW, displayH));
+
             ImGui::SameLine();
-            
+
             // Text beside image and music player under the text
             ImGui::BeginGroup();
             ImGui::Text("For use with private servers and their communities.");

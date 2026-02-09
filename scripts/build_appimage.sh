@@ -30,7 +30,9 @@ mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/applications" "${APPDIR}/usr/s
 
 # Copy files
 cp "${BUILD_DIR}/Watercan" "${APPDIR}/usr/bin/Watercan"
-cp -r "${ROOT_DIR}/res" "${APPDIR}/res" || true
+# Copy resource directory contents into AppDir res/ (avoid res/res nesting)
+mkdir -p "${APPDIR}/res"
+cp -r "${ROOT_DIR}/res/." "${APPDIR}/res/" || true
 cp "${ROOT_DIR}/README.md" "${APPDIR}/" || true
 cp "${ROOT_DIR}/LICENSE" "${APPDIR}/" || true
 cp "${ROOT_DIR}/DOCS_LINUX_BUILD.md" "${APPDIR}/" || true
