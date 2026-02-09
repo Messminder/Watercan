@@ -4,9 +4,9 @@ To water and grow **spirit trees!**
 Watercan is a dependency tree viewer and editor specialized for Sky: Children Of The Light.
 It is currently intended for private server software developers, but anyone can use it to create their own spirit trees that are compatible with ThatModdingCommunity, NightSky Communal Ark and other private server softwares.
 
-Currently, this software is **almost** on point for release, but you're welcome to download it's earlybird on each of it's repo branch in the Standalone folder. It supports all spirits from The Season of Belonging until The Season of the Two Embers Part I. (Sky: Light awaits -> Sky: COTL 0.32.0)
+Currently, this software is **almost** on point for release, but you're welcome to download it's earlybird releases for Linux (AppImage) and Windows (Standalone exe). It supports all spirits from The Season of Belonging until The Season of the Two Embers Part I. (Sky: Light awaits -> Sky: COTL 0.32.0)
 
-Further knowledge gathering is requiered to support spirits from Season of Migration and onward.
+Further knowledge gathering is requiered to support spirits from Season of Migration and onward and will come in a future release.
 
 ## Nice features:
 * Interactive dependency tree viewer and editor. Allowing the user to add, delete, link and unlink nodes
@@ -36,7 +36,7 @@ Further knowledge gathering is requiered to support spirits from Season of Migra
 
 ![How pretty](media/Screenshot%20From%202026-02-08%2000-50-46.png "Restore Flow Animation")
 
-*Seriously, what a beautiful piece of software.*
+*Seriously, look at that beautiful piece of software.*
 
 ## What's currently lacking:
 * Watercan should be able to process names + ID = this icon! So displayed spirit trees would closely mimick what is reflected ingame
