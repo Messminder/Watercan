@@ -12,9 +12,15 @@ OUT_DIR="${2:-${ROOT_DIR}/Standalone}"
 
 echo "Using BUILD_DIR=${BUILD_DIR} OUT_DIR=${OUT_DIR}"
 
-# Check binary
+# Ensure binary exists and is built with embedded assets (BUILD_SINGLE_EXE=ON)
 if [[ ! -x "${BUILD_DIR}/Watercan" ]]; then
-  echo "Error: Watercan binary not found or not executable in ${BUILD_DIR}. Build first." >&2
+  echo "Watercan binary not found in ${BUILD_DIR}. Building with embedded assets..."
+  mkdir -p "${BUILD_DIR}"
+  (cd "${BUILD_DIR}" && cmake "${ROOT_DIR}" -DBUILD_SINGLE_EXE=ON -DCMAKE_BUILD_TYPE=Release && cmake --build . -- -j$(nproc || echo 2))
+fi
+# Verify binary executable
+if [[ ! -x "${BUILD_DIR}/Watercan" ]]; then
+  echo "Error: Watercan binary not found or not executable in ${BUILD_DIR} after build." >&2
   exit 2
 fi
 
@@ -44,9 +50,13 @@ EOF
 # Also place a copy of the .desktop file at the AppDir root (required by appimagetool)
 cp "${APPDIR}/usr/share/applications/Watercan.desktop" "${APPDIR}/Watercan.desktop" || true
 
-# Icon: use TheBrokenClip.png as the application icon (resizing not performed)
-ICON_SRC="${ROOT_DIR}/res/TheBrokenClip.png"
-if [[ -f "${ICON_SRC}" ]]; then
+# Icon: prefer TheBrokenMind.png if available, otherwise pick any PNG in res/ if present
+ICON_SRC="${ROOT_DIR}/res/TheBrokenMind.png"
+if [[ ! -f "${ICON_SRC}" ]]; then
+  # Fallback: pick the first png in res/
+  ICON_SRC=$(ls "${ROOT_DIR}/res"/*.png 2>/dev/null | head -n1 || true)
+fi
+if [[ -n "${ICON_SRC}" && -f "${ICON_SRC}" ]]; then
   # Copy to the common size used by AppImage desktop integration
   cp "${ICON_SRC}" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/watercan.png" || true
   # Place a top-level copy for appimagetool

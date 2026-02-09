@@ -13,6 +13,8 @@
 extern "C" {
     // stb_vorbis_decode_filename: returns number of samples per channel and writes malloc'd interleaved short* to *output
     int stb_vorbis_decode_filename(const char* filename, int* channels, int* sample_rate, short** output);
+    // stb_vorbis_decode_memory: same as above but decodes from memory buffer
+    int stb_vorbis_decode_memory(const unsigned char *mem, int len, int *channels, int *sample_rate, short **output);
 } 
 
 MusicPlayer::MusicPlayer() {}
@@ -31,22 +33,65 @@ bool MusicPlayer::load(const std::string& path) {
         return false;
     }
 
+    auto convert_and_free = [&](short* dataPtr, int length, int ch) {
+        m_sampleRate = sr;
+        m_samples.clear();
+        m_samples.reserve((size_t)length);
+        for (int i = 0; i < length; ++i) {
+            if (ch == 1) {
+                m_samples.push_back(dataPtr[i] / 32768.0f);
+            } else {
+                int idx = i * ch;
+                float sum = 0.0f;
+                for (int c = 0; c < ch; ++c) sum += dataPtr[idx + c];
+                m_samples.push_back((sum / ch) / 32768.0f);
+            }
+        }
+        free(dataPtr);
+    };
+
+    convert_and_free(data, len, channels);
+
+
+#ifdef HAVE_SDL2
+    // Fill s16 buffer for playback (mono)
+    m_s16buffer.resize(m_samples.size());
+    for (size_t i = 0; i < m_samples.size(); ++i) {
+        float v = m_samples[i];
+        if (v > 1.0f) v = 1.0f; if (v < -1.0f) v = -1.0f;
+        m_s16buffer[i] = (int16_t)std::lround(v * 32767.0f);
+    }
+#endif
+
+    m_playOffsetSamples = 0;
+    m_playing = false;
+    return true;
+}
+
+bool MusicPlayer::loadFromMemory(const unsigned char* mem, size_t len) {
+    unload();
+    if (!mem || len == 0) return false;
+
+    int channels = 0;
+    int sr = 0;
+    short* data = nullptr;
+    int samples = stb_vorbis_decode_memory(mem, (int)len, &channels, &sr, &data);
+    if (!data || samples <= 0 || channels <= 0 || sr <= 0) {
+        if (data) free(data);
+        return false;
+    }
+
+    // Convert and free the decoded interleaved s16 buffer
     m_sampleRate = sr;
     m_samples.clear();
-    m_samples.reserve((size_t)len);
-
-    // Convert interleaved S16 to mono float (-1..1)
-    for (int i = 0; i < len; ++i) {
-        if (channels == 1) {
-            m_samples.push_back(data[i] / 32768.0f);
-        } else {
-            int idx = i * channels;
-            float sum = 0.0f;
-            for (int c = 0; c < channels; ++c) sum += data[idx + c];
+    m_samples.reserve((size_t)samples);
+    for (int i = 0; i < samples; ++i) {
+        if (channels == 1) m_samples.push_back(data[i] / 32768.0f);
+        else {
+            int idx = i * channels; float sum = 0; for (int c = 0; c < channels; ++c) sum += data[idx + c];
             m_samples.push_back((sum / channels) / 32768.0f);
         }
     }
-
     free(data);
 
 #ifdef HAVE_SDL2

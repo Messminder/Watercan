@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <string>
 #include <limits>
+#include <sstream>
 #ifdef HAVE_SDL2
 #include <SDL2/SDL.h>
 #endif
@@ -1278,16 +1279,28 @@ void App::renderUI() {
 
         // Attempt to load the embedded About music (res/inneruniverse.ogg) only if the secret has been unlocked
         if (m_aboutMusicUnlocked && !m_aboutMusicLoaded) {
+            bool loadedFromDisk = false;
             std::vector<std::string> candidates = {"../res/inneruniverse.ogg", "res/inneruniverse.ogg", "./res/inneruniverse.ogg"};
             for (const auto &c : candidates) {
                 try {
                     if (std::filesystem::exists(c)) {
                         if (m_musicPlayer.load(c)) {
                             m_aboutMusicLoaded = true;
+                            loadedFromDisk = true;
                             break;
                         }
                     }
                 } catch (...) {}
+            }
+            // If not found on disk, try embedded resource
+            if (!loadedFromDisk && !m_aboutMusicLoaded) {
+                size_t elen = 0;
+                const unsigned char* em = embedded_resource_data("inneruniverse.ogg", &elen);
+                if (em && elen > 0) {
+                    if (m_musicPlayer.loadFromMemory(em, elen)) {
+                        m_aboutMusicLoaded = true;
+                    }
+                }
             }
         }
 
@@ -1661,6 +1674,14 @@ void App::renderUI() {
                                         if (m_musicPlayer.load(c)) { m_aboutMusicLoaded = true; break; }
                                     }
                                 } catch (...) {}
+                            }
+                            // If not found on disk, try embedded music
+                            if (!m_aboutMusicLoaded) {
+                                size_t elen = 0;
+                                const unsigned char* em = embedded_resource_data("inneruniverse.ogg", &elen);
+                                if (em && elen > 0) {
+                                    if (m_musicPlayer.loadFromMemory(em, elen)) m_aboutMusicLoaded = true;
+                                }
                             }
                             // Load LRC lyrics file alongside the music
                             if (!m_lrcLoaded) {

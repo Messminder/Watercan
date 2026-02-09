@@ -10,8 +10,10 @@ public:
     MusicPlayer();
     ~MusicPlayer();
 
-    // Load an OGG file; returns true on success
+    // Load an OGG file from disk; returns true on success
     bool load(const std::string& path);
+    // Load an OGG file from memory buffer; returns true on success
+    bool loadFromMemory(const unsigned char* data, size_t len);
     // Unload any loaded audio
     void unload();
 
