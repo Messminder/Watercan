@@ -1,6 +1,7 @@
 # Build directories
 build/
 build-*/
+build-windows/
 cmake-build-*/
 
 # Video files (too large for git)
@@ -49,3 +50,4 @@ Release/
 # Windows
 Thumbs.db
 *.pdb
+dist/

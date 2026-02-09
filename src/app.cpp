@@ -1775,11 +1775,13 @@ void App::renderUI() {
                 // Playback controls
                 if (!m_musicPlayer.isPlaying()) {
                     if (ImGui::Button("Play")) {
-                        m_musicPlayer.play();
+                        bool ok = m_musicPlayer.play();
+                        fprintf(stderr, "[app] Play clicked: hasAudio=%d dur=%.2f pos=%.3f play_ok=%d\n", (int)m_musicPlayer.hasAudio(), m_musicPlayer.getDurationSeconds(), m_musicPlayer.getPositionSeconds(), (int)ok);
                     }
                 } else {
                     if (ImGui::Button("Pause")) {
                         m_musicPlayer.pause();
+                        fprintf(stderr, "[app] Pause clicked: pos=%.3f\n", m_musicPlayer.getPositionSeconds());
                     }
                 }
                 ImGui::SameLine();
