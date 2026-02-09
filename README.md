@@ -108,3 +108,4 @@ This project is provided as-is under the MIT license.
 
 ## Disclaimer
 Watercan can absolutely give you a faulty file that will crash your clients if you misuse it!
+Also Sky isn't a "bragging game", Theobald! >:(
