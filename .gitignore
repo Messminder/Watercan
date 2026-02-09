@@ -51,3 +51,4 @@ Release/
 Thumbs.db
 *.pdb
 dist/
+Standalone/
