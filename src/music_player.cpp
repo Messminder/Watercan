@@ -127,6 +127,7 @@ bool MusicPlayer::hasAudio() const { return !m_samples.empty() && m_sampleRate >
 bool MusicPlayer::play() {
     if (!hasAudio()) return false;
 #ifdef HAVE_SDL2
+    fprintf(stderr, "[music] play(): sampleRate=%d samples=%zu offset=%zu\n", m_sampleRate, m_s16buffer.size(), m_playOffsetSamples);
     if (!m_dev) {
         SDL_AudioSpec want;
         SDL_zero(want);
@@ -137,8 +138,18 @@ bool MusicPlayer::play() {
         want.callback = nullptr;
         m_dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
         if (!m_dev) {
-            fprintf(stderr, "[music] SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
-            return false;
+            fprintf(stderr, "[music] SDL_OpenAudioDevice failed (mono): %s\n", SDL_GetError());
+            // Try stereo as a fallback
+            want.channels = 2;
+            m_dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+            if (!m_dev) {
+                fprintf(stderr, "[music] SDL_OpenAudioDevice failed (stereo fallback): %s\n", SDL_GetError());
+                return false;
+            } else {
+                fprintf(stderr, "[music] SDL_OpenAudioDevice succeeded with stereo fallback (dev=%u)\n", m_dev);
+            }
+        } else {
+            fprintf(stderr, "[music] SDL_OpenAudioDevice succeeded (dev=%u)\n", m_dev);
         }
     }
     // Clear any queued audio and queue from current offset
@@ -150,12 +161,16 @@ bool MusicPlayer::play() {
         remaining = m_s16buffer.size();
     }
     if (remaining > 0) {
-        const void* ptr = m_s16buffer.data() + m_playOffsetSamples;
+        const void* ptr = reinterpret_cast<const void*>(m_s16buffer.data() + m_playOffsetSamples);
         Uint32 bytes = (Uint32)(remaining * sizeof(int16_t));
         if (SDL_QueueAudio(m_dev, ptr, bytes) != 0) {
             fprintf(stderr, "[music] SDL_QueueAudio failed: %s\n", SDL_GetError());
             return false;
+        } else {
+            fprintf(stderr, "[music] queued %u bytes for playback\n", bytes);
         }
+    } else {
+        fprintf(stderr, "[music] no audio to queue (remaining=0)\n");
     }
     SDL_PauseAudioDevice(m_dev, 0); // start playback
     m_playing = true;
@@ -173,7 +188,8 @@ void MusicPlayer::pause() {
         // compute how many samples are left in queue and update play offset so resume continues
         Uint32 queued = SDL_GetQueuedAudioSize(m_dev);
         Uint32 totalBytes = (Uint32)(m_s16buffer.size() * sizeof(int16_t));
-        Uint32 played = totalBytes > queued ? (totalBytes - queued) : totalBytes;
+        // If queued >= totalBytes then nothing has been played yet (played = 0)
+        Uint32 played = (queued < totalBytes) ? (totalBytes - queued) : 0;
         m_playOffsetSamples = (size_t)(played / sizeof(int16_t));
         SDL_PauseAudioDevice(m_dev, 1);
     }
@@ -210,7 +226,8 @@ double MusicPlayer::getPositionSeconds() const {
     if (m_dev) {
         Uint32 queued = SDL_GetQueuedAudioSize(m_dev);
         Uint64 totalBytes = (Uint64)(m_s16buffer.size() * sizeof(int16_t));
-        Uint64 played = totalBytes > queued ? (totalBytes - queued) : totalBytes;
+        // If queued >= totalBytes then nothing has been played yet (played = 0)
+        Uint64 played = (queued < totalBytes) ? (totalBytes - queued) : 0ULL;
         size_t playedSamples = (size_t)(played / sizeof(int16_t));
         return (double)playedSamples / (double)m_sampleRate;
     }
