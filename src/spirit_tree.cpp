@@ -18,73 +18,9 @@ bool SpiritTreeManager::loadFromFile(const std::string& filepath) {
 
     try {
         json data = json::parse(file);
-        // Delegate to common loader
-        // Clear existing data
-        m_trees.clear();
-        m_spiritNames.clear();
-        m_guideNames.clear();
-        m_allSpiritNamesOrdered.clear();
-
-        // Parse all nodes and group by spirit, tracking first occurrence order
-        std::unordered_map<std::string, std::vector<SpiritNode>> spiritNodes;
-        std::vector<std::string> spiritOrder;  // Track order of first appearance
-
-        for (const auto& item : data) {
-            SpiritNode node;
-            node.id = item.value("id", 0ULL);
-            node.dep = item.value("dep", 0ULL);
-            node.name = item.value("nm", "");
-            node.originalName = node.name;
-            node.spirit = item.value("spirit", "");
-            node.type = item.value("typ", "");
-            node.costType = item.value("ctyp", "");
-            node.cost = item.value("cst", 0);
-            node.isAdventurePass = item.value("ap", false);
-
-            if (!node.spirit.empty()) {
-                // Track first appearance order
-                if (spiritNodes.find(node.spirit) == spiritNodes.end()) {
-                    spiritOrder.push_back(node.spirit);
-                }
-                spiritNodes[node.spirit].push_back(node);
-            }
-        }
-
-        // Build trees for each spirit in file order and categorize
-        for (const auto& spiritName : spiritOrder) {
-            auto& nodes = spiritNodes[spiritName];
-            SpiritTree tree;
-            tree.spiritName = spiritName;
-            tree.nodes = std::move(nodes);
-
-            buildTree(tree);
-            computeLayout(tree);
-
-            m_allSpiritNamesOrdered.push_back(spiritName);
-            m_trees[spiritName] = std::move(tree);
-        }
-
-        // Categorize into spirits and guides (maintaining file order)
-        for (const auto& name : m_allSpiritNamesOrdered) {
-            if (checkIfGuide(m_trees[name])) {
-                m_guideNames.push_back(name);
-            } else {
-                m_spiritNames.push_back(name);
-            }
-        }
-
+        if (!loadFromJson(data)) return false;
         m_loadedFile = filepath;
-
-        // Cache original node IDs per spirit for fast needsRestore checks
-        m_originalNodeIds.clear();
-        m_cachedState.clear();
-        for (const auto& kv : m_trees) {
-            auto& ids = m_originalNodeIds[kv.first];
-            for (const auto& n : kv.second.nodes) ids.insert(n.id);
-        }
-
         return true;
-
     } catch (const std::exception& e) {
         return false;
     }
@@ -108,77 +44,73 @@ bool SpiritTreeManager::getNameFromLoadedFile(const std::string& spiritName, uin
     return false;
 }
 
+bool SpiritTreeManager::loadFromJson(const nlohmann::json& data) {
+    m_trees.clear();
+    m_spiritNames.clear();
+    m_guideNames.clear();
+    m_allSpiritNamesOrdered.clear();
+
+    std::unordered_map<std::string, std::vector<SpiritNode>> spiritNodes;
+    std::vector<std::string> spiritOrder;
+
+    for (const auto& item : data) {
+        SpiritNode node;
+        node.id = item.value("id", 0ULL);
+        node.dep = item.value("dep", 0ULL);
+        node.name = item.value("nm", "");
+        node.originalName = node.name;
+        node.spirit = item.value("spirit", "");
+        node.type = item.value("typ", "");
+        node.costType = item.value("ctyp", "");
+        node.cost = item.value("cst", 0);
+        node.isAdventurePass = item.value("ap", false);
+
+        if (!node.spirit.empty()) {
+            if (spiritNodes.find(node.spirit) == spiritNodes.end()) {
+                spiritOrder.push_back(node.spirit);
+            }
+            spiritNodes[node.spirit].push_back(node);
+        }
+    }
+
+    for (const auto& spiritName : spiritOrder) {
+        auto& nodes = spiritNodes[spiritName];
+        SpiritTree tree;
+        tree.spiritName = spiritName;
+        tree.nodes = std::move(nodes);
+
+        buildTree(tree);
+        computeLayout(tree);
+
+        m_allSpiritNamesOrdered.push_back(spiritName);
+        m_trees[spiritName] = std::move(tree);
+    }
+
+    for (const auto& name : m_allSpiritNamesOrdered) {
+        if (checkIfGuide(m_trees[name])) {
+            m_guideNames.push_back(name);
+        } else {
+            m_spiritNames.push_back(name);
+        }
+    }
+
+    m_originalNodeIds.clear();
+    m_cachedState.clear();
+    for (const auto& kv : m_trees) {
+        auto& ids = m_originalNodeIds[kv.first];
+        for (const auto& n : kv.second.nodes) ids.insert(n.id);
+    }
+
+    return true;
+}
+
 bool SpiritTreeManager::loadFromString(const std::string& jsonContents) {
     try {
         json data = json::parse(jsonContents);
-
-        // Clear existing data
-        m_trees.clear();
-        m_spiritNames.clear();
-        m_guideNames.clear();
-        m_allSpiritNamesOrdered.clear();
-
-        // Parse all nodes and group by spirit, tracking first occurrence order
-        std::unordered_map<std::string, std::vector<SpiritNode>> spiritNodes;
-        std::vector<std::string> spiritOrder;  // Track order of first appearance
-
-        for (const auto& item : data) {
-            SpiritNode node;
-            node.id = item.value("id", 0ULL);
-            node.dep = item.value("dep", 0ULL);
-            node.name = item.value("nm", "");
-            node.originalName = node.name;
-            node.spirit = item.value("spirit", "");
-            node.type = item.value("typ", "");
-            node.costType = item.value("ctyp", "");
-            node.cost = item.value("cst", 0);
-            node.isAdventurePass = item.value("ap", false);
-
-            if (!node.spirit.empty()) {
-                // Track first appearance order
-                if (spiritNodes.find(node.spirit) == spiritNodes.end()) {
-                    spiritOrder.push_back(node.spirit);
-                }
-                spiritNodes[node.spirit].push_back(node);
-            }
-        }
-
-        // Build trees for each spirit in file order and categorize
-        for (const auto& spiritName : spiritOrder) {
-            auto& nodes = spiritNodes[spiritName];
-            SpiritTree tree;
-            tree.spiritName = spiritName;
-            tree.nodes = std::move(nodes);
-
-            buildTree(tree);
-            computeLayout(tree);
-
-            m_allSpiritNamesOrdered.push_back(spiritName);
-            m_trees[spiritName] = std::move(tree);
-        }
-
-        // Categorize into spirits and guides (maintaining file order)
-        for (const auto& name : m_allSpiritNamesOrdered) {
-            if (checkIfGuide(m_trees[name])) {
-                m_guideNames.push_back(name);
-            } else {
-                m_spiritNames.push_back(name);
-            }
-        }
-
+        if (!loadFromJson(data)) return false;
         // When loading from string this is not a file on disk
         m_loadedFile.clear();
-
-        // Cache original node IDs per spirit
-        m_originalNodeIds.clear();
-        m_cachedState.clear();
-        for (const auto& kv : m_trees) {
-            auto& ids = m_originalNodeIds[kv.first];
-            for (const auto& n : kv.second.nodes) ids.insert(n.id);
-        }
-
         return true;
-
     } catch (const std::exception& e) {
         return false;
     }
@@ -610,7 +542,10 @@ bool SpiritTreeManager::moveNodeBase(const std::string& spiritName, uint64_t nod
             tree.maxY = std::max(tree.maxY, node.y);
             tree.width = tree.maxX - tree.minX;
             tree.height = tree.maxY - tree.minY;
-            markDirty(spiritName);
+            // Mark that a manual move occurred: a reshape is now desirable
+            auto &cs = m_cachedState[spiritName];
+            cs.reshapeDirty = false;
+            cs.reshapeResult = true;
             return true;
         }
     }
@@ -638,6 +573,10 @@ bool SpiritTreeManager::moveTreeBase(const std::string& spiritName, float dx, fl
     }
     tree.width = tree.maxX - tree.minX;
     tree.height = tree.maxY - tree.minY;
+    // Mark that a manual tree move occurred: reshape is desirable
+    auto &cs = m_cachedState[spiritName];
+    cs.reshapeDirty = false;
+    cs.reshapeResult = true;
     return true;
 }
 
@@ -688,6 +627,11 @@ bool SpiritTreeManager::moveSubtreeBase(const std::string& spiritName, uint64_t 
     tree.width = tree.maxX - tree.minX;
     tree.height = tree.maxY - tree.minY;
 
+    // Mark that a manual subtree move occurred: reshape is desirable
+    auto &cs = m_cachedState[spiritName];
+    cs.reshapeDirty = false;
+    cs.reshapeResult = true;
+
     if (outMovedIds) *outMovedIds = std::move(subtree);
     return true;
 }
@@ -710,7 +654,10 @@ bool SpiritTreeManager::reshapeTreeAndCollectShifts(const std::string& spiritNam
     }
 
     if (outShifts) *outShifts = std::move(mergedShifts);
-    markDirty(spiritName);
+    // After computing and applying a reshape, the tree now matches layout; clear cached reshape flag.
+    auto &cs = m_cachedState[spiritName];
+    cs.reshapeDirty = false;
+    cs.reshapeResult = false;
     return true;
 }
 
@@ -949,7 +896,10 @@ bool SpiritTreeManager::layoutSubtreeAndCollectShifts(const std::string& spiritN
         }
     }
 
-    markDirty(spiritName);
+    // After re-layout of a subtree, it's consistent with layout; clear reshape-needed flag.
+    auto &cs = m_cachedState[spiritName];
+    cs.reshapeDirty = false;
+    cs.reshapeResult = false;
     return true;
 }
 
@@ -1129,6 +1079,16 @@ bool SpiritTreeManager::reloadSpirit(const std::string& spiritName) {
         buildTree(tree);
         computeLayout(tree);
 
+        // Update cached original IDs for this spirit
+        auto &ids = m_originalNodeIds[spiritName];
+        ids.clear();
+        for (const auto& n : tree.nodes) ids.insert(n.id);
+
+        // After reload, the tree matches the loaded file; clear cached flags
+        auto &cs = m_cachedState[spiritName];
+        cs.reshapeDirty = false; cs.reshapeResult = false;
+        cs.restoreDirty = false; cs.restoreResult = false;
+
         // Clear all snap records for this spirit
         clearAllSnaps(spiritName);
         markDirty(spiritName);
@@ -1202,26 +1162,6 @@ std::vector<uint64_t> SpiritTreeManager::restoreSnaps(const std::string& spiritN
                 // Clamp index and insert
                 size_t insertIdx = std::min(idx, parent->children.size());
                 parent->children.insert(parent->children.begin() + insertIdx, rid);
-            }
-        }
-    }
-
-    // Rebuild tree relationships if we restored any nodes so subsequent layout calls
-    // operate on the full tree structure
-    if (!toErase.empty()) {
-        rebuildTree(spiritName);
-        // After rebuild we should ensure each restored node occupies its original index
-        // (so reorder and manual child ordering persists across snaps)
-        const SpiritTree* tptr = getTree(spiritName);
-        if (tptr) {
-            for (uint64_t rid : restored) {
-                // We didn't keep the original index in the map because we erased entries above.
-                // Instead, check if we have any stored information in m_perTreeSnaps? Not directly.
-                // Strategy: when recordSnap is called it already stored index in the SnapInfo map; since
-                // we removed the map entry above, we need to reconstruct: callers should record SnapInfo
-                // in m_perTreeSnaps as needed. For now, best-effort: leave ordering as-is (append) if no index found.
-                // (This branch is conservative and will be improved if we keep temp index mapping)
-                // TODO: preserve and apply original index for restored children.
             }
         }
     }

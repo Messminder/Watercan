@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
+#include <nlohmann/json_fwd.hpp>
 
 namespace Watercan {
 
@@ -206,6 +207,8 @@ private:
     void computeLayout(SpiritTree& tree);
     void layoutSubtree(SpiritTree& tree, SpiritNode& node, float x, float y, int depth);
     bool checkIfGuide(const SpiritTree& tree) const;
+    // Common loader: parse a pre-parsed JSON array and populate trees
+    bool loadFromJson(const nlohmann::json& data);
     
     std::unordered_map<std::string, SpiritTree> m_trees;
     std::vector<std::string> m_spiritNames;  // Regular spirits (in file order)

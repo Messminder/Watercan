@@ -2,8 +2,9 @@
 
 #include "spirit_tree.h"
 #include "tree_renderer.h"
-#include "video_player.h"
 #include "TextEditor.h"
+#include "music_player.h"
+#include <vector>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -77,19 +78,39 @@ private:
     int m_aboutImageHeight = 0;
     std::string m_currentAboutImageName;  // Track which image is loaded
 
-    // Embedded local video player (optional via FFmpeg)
-    VideoPlayer m_videoPlayer;
-    // Binary is usually run from the build directory, so prefer a path relative to that
-    std::string m_aboutVideoPath = "../res/clippy.mp4";
+    // In-app music player for the About dialog (plays res/inneruniverse.ogg)
+    // Implemented with stb_vorbis decode + SDL2 queue playback. The player is
+    // normally hidden; it is unlocked by the secret "Shell" interaction.
+    MusicPlayer m_musicPlayer;
+    bool m_aboutMusicLoaded = false;
+    bool m_aboutMusicUnlocked = false; // becomes true after secret is activated
 
-    // Playback status and transient message for About dialog
-    std::string m_aboutVideoNote;
-    double m_aboutVideoNoteUntil = 0.0;
-    
-    // Hidden video controls reveal (CTRL+ALT+C for 5 seconds)
-    double m_videoControlsKeyHeldSince = 0.0;
-    bool m_videoControlsRevealed = false;
-    
+    // "Shell" secret UI state: per-letter colors and click progress
+    std::array<ImVec4,5> m_shellLetterColors = { ImVec4(0,0,0,0), ImVec4(0,0,0,0), ImVec4(0,0,0,0), ImVec4(0,0,0,0), ImVec4(0,0,0,0) };
+    int m_shellColoredLetters = 0; // 0..5 (fully colored when == 5)
+
+    // Ctrl+Alt+S hold detection for unlocking (hold for 5 seconds)
+    std::chrono::steady_clock::time_point m_ctrlAltSHoldStart;
+    bool m_ctrlAltSHoldActive = false;
+
+    // Parsed LRC lyrics: timestamp (seconds) -> line text
+    struct LrcLine { double time; std::string text; };
+    std::vector<LrcLine> m_lrcLines;
+    bool m_lrcLoaded = false;
+
+    // Secondary font with Cyrillic support (used only for lyric display)
+    ImFont* m_cyrillicFont = nullptr;
+
+    // Credits scroll offset (pixels, auto-incremented each frame)
+    float m_creditsScrollY = 0.0f;
+
+    // Oscilloscope smoothing state: per-pixel previous values to blend frames smoothly
+    std::vector<float> m_scopePrev; // previous frame values (length == last pixel count)
+    float m_scopeSmoothAlpha = 0.68f; // blending factor (0..1), higher==more smoothing
+    float m_scopeGain = 2.2f; // visual amplification of waveform (1.0 = none) - increased to make waveform more visible
+    // Number of decoded samples shown in oscilloscope window (smaller => more zoom)
+    int m_scopeWindowSamples = 512; // default zoom: show 512 samples (was 2048) 
+
     // JSON editor state
     uint64_t m_lastEditedNodeId = 0;
     int m_lastEditedSelectionCount = 0;
@@ -153,6 +174,15 @@ private:
     bool m_deleteConfirmMode = false;
     uint64_t m_deleteNodeId = TreeRenderer::NO_NODE_ID;
 
+    // Parents with too many children; used to display persistent warning and red highlight
+    std::unordered_set<uint64_t> m_offendingParents;
+    // Map parent->offending child id (when a parent has 4+ children the offending child is highlighted)
+    std::unordered_map<uint64_t, uint64_t> m_parentOffendingChild;
+
+    // Check and update offending status for a parent (too many children). Shows persistent message.
+    // If offendingChildId != 0, that child will be marked as the offending node when threshold is reached.
+    void updateOffendingStatusForParent(uint64_t parentId, uint64_t offendingChildId = 0);
+
     // New / delete spirit UI
     bool m_showNewSpiritModal = false;
     char m_newSpiritName[128] = "";
@@ -202,6 +232,13 @@ private:
     // Transient message shown at the top of Tree Viewer (eg. link failures)
     std::string m_treeMessage;
     std::chrono::steady_clock::time_point m_treeMessageUntil;
+    enum class TreeMessageType { None = 0, Error, Warning };
+    TreeMessageType m_treeMessageType = TreeMessageType::None;
+
+    // Helpers to set / clear the top-of-viewer transient message
+    void setTreeMessage(const std::string& msg, TreeMessageType type, std::chrono::seconds duration = std::chrono::seconds(3));
+    void clearTreeMessageIfMatches(const std::string& msg);
+    void clearTreeMessage();
     // Known typ values seen across loaded files (persisted in-memory during session)
     std::unordered_set<std::string> m_knownTypes;
 

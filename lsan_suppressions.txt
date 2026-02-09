@@ -1,0 +1,28 @@
+# LeakSanitizer suppressions for known third-party library false positives.
+# Usage: LSAN_OPTIONS=suppressions=lsan_suppressions.txt ./Watercan
+
+# GLFW / X11 / XKB internals (process-lifetime allocations)
+leak:libX11
+leak:libxcb
+leak:libxkbcommon
+leak:libGLX
+leak:libglfw
+
+# SDL2 audio backend internals
+leak:libSDL2
+leak:libpulse
+leak:libpipewire
+leak:libasound
+
+# Mesa / GL driver internals
+leak:libGLdispatch
+leak:libEGL
+leak:mesa
+leak:radeonsi
+leak:i965
+leak:iris
+leak:nouveau
+
+# NVIDIA proprietary driver + D-Bus internals
+leak:libnvidia-glcore
+leak:libdbus

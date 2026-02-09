@@ -1200,7 +1200,20 @@ void TreeRenderer::drawNode(ImDrawList* drawList, const SpiritNode& node,
     
     // Main circle
     drawList->AddCircleFilled(screenPos, radius, fillColor);
-    drawList->AddCircle(screenPos, radius, borderColor, 0, 2.0f * zoom);
+    float borderThickness = 2.0f * zoom;
+    if (m_offendingNodes.count(node.id) > 0) {
+        // More vivid border for offending nodes
+        borderColor = IM_COL32(255, 20, 20, 255);
+        borderThickness = 4.0f * zoom;
+    }
+
+    // Root node: add a subtle golden halo but keep the normal border
+    if (node.dep == 0) {
+        // subtle halo glow behind the border for extra visibility
+        drawList->AddCircle(screenPos, radius * 1.18f, IM_COL32(255, 220, 100, 60), 0, 2.0f * zoom);
+    }
+
+    drawList->AddCircle(screenPos, radius, borderColor, 0, borderThickness);
     
     // Draw AP indicator (small star/diamond) at north west of node
     if (node.isAdventurePass) {
@@ -1580,6 +1593,11 @@ ImU32 TreeRenderer::getNodeBorderColor(const SpiritNode& node) const {
             int a = (int)(std::clamp(c[3], 0.0f, 1.0f) * 255.0f);
             return IM_COL32(r, g, b, a);
         }
+    }
+
+    // If this node is offending, draw a strong red border
+    if (m_offendingNodes.count(node.id) > 0) {
+        return IM_COL32(230, 60, 60, 255);
     }
 
     if (node.dep == 0) {

@@ -6,18 +6,26 @@
 
 namespace Watercan {
 
+// Return the Watercan config directory (~/.config/watercan), creating it if needed.
+// Returns empty path on failure.
+static std::filesystem::path getConfigDir(bool createIfMissing = false) {
+    std::filesystem::path configDir;
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg && std::strlen(xdg) > 0) configDir = xdg;
+    else {
+        const char* home = std::getenv("HOME");
+        if (!home) return {};
+        configDir = std::filesystem::path(home) / ".config";
+    }
+    configDir /= "watercan";
+    if (createIfMissing) std::filesystem::create_directories(configDir);
+    return configDir;
+}
+
 bool App::saveTypeColorsToDisk() {
     try {
-        std::filesystem::path configDir;
-        const char* xdg = std::getenv("XDG_CONFIG_HOME");
-        if (xdg && std::strlen(xdg) > 0) configDir = xdg;
-        else {
-            const char* home = std::getenv("HOME");
-            if (!home) return false;
-            configDir = std::filesystem::path(home) / ".config";
-        }
-        configDir /= "watercan";
-        std::filesystem::create_directories(configDir);
+        auto configDir = getConfigDir(true);
+        if (configDir.empty()) return false;
         std::filesystem::path file = configDir / "type_colors.json";
 
         nlohmann::json j;
@@ -38,15 +46,8 @@ bool App::saveTypeColorsToDisk() {
 
 bool App::loadTypeColorsFromDisk() {
     try {
-        std::filesystem::path configDir;
-        const char* xdg = std::getenv("XDG_CONFIG_HOME");
-        if (xdg && std::strlen(xdg) > 0) configDir = xdg;
-        else {
-            const char* home = std::getenv("HOME");
-            if (!home) return false;
-            configDir = std::filesystem::path(home) / ".config";
-        }
-        configDir /= "watercan";
+        auto configDir = getConfigDir();
+        if (configDir.empty()) return false;
         std::filesystem::path file = configDir / "type_colors.json";
         if (!std::filesystem::exists(file)) return false;
 

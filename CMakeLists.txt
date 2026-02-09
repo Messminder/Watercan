@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # Workaround for older CMake min versions in dependencies
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "")
 
-project(Watercan VERSION 1.5.8 LANGUAGES CXX C)
+project(Watercan VERSION 1.6 LANGUAGES CXX C)
 
 # Build option: attempt a single-binary build by preferring static libs where possible.
 # This is a best-effort option: OpenGL (libGL) will remain dynamic to preserve compatibility.
@@ -69,30 +69,10 @@ FetchContent_MakeAvailable(stb)
 # Find OpenGL
 find_package(OpenGL REQUIRED)
 
-# Optional: FFmpeg (libav*) for embedded video decode + SDL2 for audio
+# Detect SDL2 for audio support (used by MusicPlayer)
 find_package(PkgConfig)
 if (PKG_CONFIG_FOUND)
-    pkg_check_modules(FF_AVFORMAT libavformat)
-    pkg_check_modules(FF_AVCODEC libavcodec)
-    pkg_check_modules(FF_SWSCALE libswscale)
-    pkg_check_modules(FF_AVUTIL libavutil)
-    pkg_check_modules(FF_SWRESAMPLE libswresample)
     pkg_check_modules(SDL2 sdl2)
-endif()
-if (FF_AVFORMAT_FOUND AND FF_AVCODEC_FOUND AND FF_SWSCALE_FOUND AND FF_AVUTIL_FOUND)
-    add_compile_definitions(HAVE_FFMPEG)
-    include_directories(${FF_AVFORMAT_INCLUDE_DIRS} ${FF_AVCODEC_INCLUDE_DIRS} ${FF_SWSCALE_INCLUDE_DIRS} ${FF_AVUTIL_INCLUDE_DIRS})
-    list(APPEND EXTRA_LIBS ${FF_AVFORMAT_LIBRARIES} ${FF_AVCODEC_LIBRARIES} ${FF_SWSCALE_LIBRARIES} ${FF_AVUTIL_LIBRARIES})
-    if (FF_SWRESAMPLE_FOUND)
-        include_directories(${FF_SWRESAMPLE_INCLUDE_DIRS})
-        list(APPEND EXTRA_LIBS ${FF_SWRESAMPLE_LIBRARIES})
-    else()
-        # Some systems provide libswresample but pkg-config may not be configured; try linking explicitly as a fallback
-        list(APPEND EXTRA_LIBS swresample)
-    endif()
-    message(STATUS "FFmpeg libraries found: video decode supported")
-else()
-    message(STATUS "FFmpeg libs not fully found; embedded video decode disabled")
 endif()
 if (SDL2_FOUND)
     add_compile_definitions(HAVE_SDL2)
@@ -125,8 +105,9 @@ add_executable(Watercan
     src/tree_renderer.cpp
     src/stb_image_impl.cpp
     src/app_type_colors.cpp
-    src/video_player.cpp
     src/TextEditor.cpp
+    src/music_player.cpp
+    build/_deps/stb-src/stb_vorbis.c
 )
 
 target_include_directories(Watercan PRIVATE 
@@ -135,11 +116,6 @@ target_include_directories(Watercan PRIVATE
     ${stb_SOURCE_DIR}
 )
 
-# If embedding assets, define compile-time flag (sources are appended below after generation)
-if(BUILD_WINDOWS_SINGLE_EXE)
-    target_compile_definitions(Watercan PRIVATE BUILD_WINDOWS_SINGLE_EXE=1)
-endif()
-
 target_link_libraries(Watercan PRIVATE 
     imgui_lib 
     nlohmann_json::nlohmann_json
@@ -147,24 +123,9 @@ target_link_libraries(Watercan PRIVATE
     OpenGL::GL
 )
 
-# Link extra optional libraries detected (FFmpeg/SDL2 etc.)
+# Link extra optional libraries (SDL2 etc.)
 if(EXTRA_LIBS)
     target_link_libraries(Watercan PRIVATE ${EXTRA_LIBS})
-endif()
-# Ensure swresample is linked when using in-process resampling (best-effort)
-find_library(SWRESAMPLE_LIB swresample)
-if(SWRESAMPLE_LIB)
-    target_link_libraries(Watercan PRIVATE ${SWRESAMPLE_LIB})
-endif()
-# Some older toolchains may need explicit references to libav* at link tail; repeat important ffmpeg libs if found
-if(FF_AVUTIL_FOUND)
-    target_link_libraries(Watercan PRIVATE ${FF_AVUTIL_LIBRARIES})
-endif()
-if(FF_AVFORMAT_FOUND)
-    target_link_libraries(Watercan PRIVATE ${FF_AVFORMAT_LIBRARIES})
-endif()
-if(FF_AVCODEC_FOUND)
-    target_link_libraries(Watercan PRIVATE ${FF_AVCODEC_LIBRARIES})
 endif()
 
 # If requested, attempt to make linker prefer static runtime libs (best-effort).
@@ -224,16 +185,71 @@ if(BUILD_WINDOWS_SINGLE_EXE OR BUILD_SINGLE_EXE)
     set(EMBED_DIR "${CMAKE_CURRENT_BINARY_DIR}/embedded")
     file(MAKE_DIRECTORY ${EMBED_DIR})
 
-    # Embed About image only (JSON will not be embedded in the exe)
-    set(EMBED_IMG_CPP "${EMBED_DIR}/embedded_about_image.cpp")
-    embed_file_as_cpp(${CMAKE_CURRENT_SOURCE_DIR}/res/TheBrokenClip.png ${EMBED_IMG_CPP} embedded_about_image_png)
+    # Embed all files under res/ into the executable. Generate C++ sources and a header with externs.
+    file(GLOB EMBED_INPUT_FILES RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/res" "${CMAKE_CURRENT_SOURCE_DIR}/res/*")
+    set(EXTRA_EMBEDDED_SOURCES)
+    set(EMBED_VAR_NAMES)
+    foreach(f IN LISTS EMBED_INPUT_FILES)
+        set(IN_PATH "${CMAKE_CURRENT_SOURCE_DIR}/res/${f}")
+        # Sanitize variable name: replace non-alnum with underscore
+        string(REGEX REPLACE "[^A-Za-z0-9]" "_" VAR_BASE "${f}")
+        # Preserve historical name for About image so existing code symbols remain stable
+        if("${f}" STREQUAL "TheBrokenClip.png")
+            set(VAR_NAME "embedded_about_image_png")
+        else()
+            set(VAR_NAME "embedded_${VAR_BASE}")
+        endif()
+        set(OUT_CPP "${EMBED_DIR}/${VAR_NAME}.cpp")
+        embed_file_as_cpp(${IN_PATH} ${OUT_CPP} ${VAR_NAME})
+        list(APPEND EXTRA_EMBEDDED_SOURCES ${OUT_CPP})
+        list(APPEND EMBED_VAR_NAMES ${VAR_NAME})
+    endforeach()
 
-# mpv support intentionally removed: using FFmpeg-based VideoPlayer instead
+    # Generate header with extern declarations (placed in embedded/ subdir so include path matches)
+    file(MAKE_DIRECTORY "${EMBED_DIR}/embedded")
+    set(EMBED_HEADER "${EMBED_DIR}/embedded/embedded_resources.h")
+    file(WRITE ${EMBED_HEADER} "#pragma once\n#include <cstddef>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
+    foreach(var IN LISTS EMBED_VAR_NAMES)
+        file(APPEND ${EMBED_HEADER} "extern const unsigned char ${var}[];\nextern const std::size_t ${var}_len;\n\n")
+    endforeach()
+    # Declare runtime accessor: returns pointer to data and sets length, or nullptr if not found
+    file(APPEND ${EMBED_HEADER} "// Return pointer to embedded resource data by filename (UTF-8).\n")
+    file(APPEND ${EMBED_HEADER} "// If found, returns pointer and writes its length into *out_len, otherwise returns nullptr.\n")
+    file(APPEND ${EMBED_HEADER} "const unsigned char* embedded_resource_data(const char* filename, size_t* out_len);\n\n")
+    file(APPEND ${EMBED_HEADER} "#ifdef __cplusplus\n}\n#endif\n")
 
+    # Generate C++ accessor that maps filenames (relative to res/) to embedded symbols
+    set(EMBED_CPP "${EMBED_DIR}/embedded/embedded_resources.cpp")
+    file(WRITE ${EMBED_CPP} "#include \"embedded_resources.h\"\n#include <string.h>\n\nconst unsigned char* embedded_resource_data(const char* filename, size_t* out_len) {\n    if (!filename) return nullptr;\n")
+    list(LENGTH EMBED_INPUT_FILES EMBED_FILES_COUNT)
+    math(EXPR EMBED_LAST_INDEX "${EMBED_FILES_COUNT} - 1")
+    if (EMBED_FILES_COUNT GREATER 0)
+        foreach(i RANGE 0 ${EMBED_LAST_INDEX})
+            list(GET EMBED_INPUT_FILES ${i} EMBED_FNAME)
+            list(GET EMBED_VAR_NAMES ${i} EMBED_VNAME)
+            # Escape backslashes (Windows paths) and quotes in filename
+            string(REPLACE "\\" "\\\\" EMBED_FNAME_ESCAPED "${EMBED_FNAME}")
+            file(APPEND ${EMBED_CPP} "    if (strcmp(filename, \"${EMBED_FNAME_ESCAPED}\") == 0) { if (out_len) *out_len = ${EMBED_VNAME}_len; return ${EMBED_VNAME}; }\n")
+        endforeach()
+    endif()
+    file(APPEND ${EMBED_CPP} "    // Not found\n    if (out_len) *out_len = 0;\n    return nullptr;\n}\n")
 
-    # Add embedded image source to list and include in the target
-    list(APPEND EXTRA_EMBEDDED_SOURCES ${EMBED_IMG_CPP})
-    target_sources(Watercan PRIVATE ${EMBED_IMG_CPP})
+    # Add generated accessor to sources so it's compiled into the executable
+    list(APPEND EXTRA_EMBEDDED_SOURCES ${EMBED_CPP})
+
+    # Generate C++ source implementing the accessor that maps filenames to symbols
+    set(EMBED_CPP "${EMBED_DIR}/embedded/embedded_resources.cpp")
+    file(WRITE ${EMBED_CPP} "#include \"embedded_resources.h\"\n#include <string.h>\n\nconst unsigned char* embedded_resource_data(const char* filename, size_t* out_len) {\n    if (!filename) return nullptr;\n")
+    # Append checks for each file/var mapping
+    foreach(idx RANGE 0 ${EMBED_INPUT_FILES_LENGTH})
+        # NOTE: We'll fill this area in later; placeholder for loop below
+    endforeach()
+    file(APPEND ${EMBED_CPP} "    // Not found\n    if (out_len) *out_len = 0;\n    return nullptr;\n}\n")
+
+    # Add embedded sources to target
+    if(EXTRA_EMBEDDED_SOURCES)
+        target_sources(Watercan PRIVATE ${EXTRA_EMBEDDED_SOURCES})
+    endif()
 
     # Ensure compile-time flag present for embedded assets
     if(BUILD_WINDOWS_SINGLE_EXE)
@@ -242,6 +258,9 @@ if(BUILD_WINDOWS_SINGLE_EXE OR BUILD_SINGLE_EXE)
     if(BUILD_SINGLE_EXE)
         target_compile_definitions(Watercan PRIVATE BUILD_SINGLE_EXE=1)
     endif()
+
+    # Ensure the build embedded dir is in include path so generated header can be found via "embedded/embedded_resources.h"
+    target_include_directories(Watercan PRIVATE ${EMBED_DIR})
 endif()
 
 # No build-time dependency on sample JSON files; the application loads JSON files at runtime via File > Open or from the working directory if provided.

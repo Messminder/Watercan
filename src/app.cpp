@@ -13,8 +13,6 @@
 #include <cstring>
 #include <vector>
 #include <cmath>
-#include <nlohmann/json.hpp>
-#include <filesystem>
 #include "embedded_resources.h"
 #include <deque>
 
@@ -23,6 +21,9 @@
 #include <algorithm>
 #include <string>
 #include <limits>
+#ifdef HAVE_SDL2
+#include <SDL2/SDL.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -30,7 +31,17 @@
 namespace Watercan {
 
 // Version information
-constexpr const char* WATERCAN_VERSION = "1.5.8";
+constexpr const char* WATERCAN_VERSION = "1.6";
+
+// Format seconds as "M:SS"
+static std::string secsToStr(double s) {
+    int si = (int)std::floor(s + 0.5);
+    int min = si / 60;
+    int sec = si % 60;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d:%02d", min, sec);
+    return std::string(buf);
+}
 
 // Error callback for GLFW
 static void glfw_error_callback(int error, const char* description) {
@@ -119,12 +130,49 @@ bool App::init() {
     // Setup Platform/Renderer backends
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
+
+    // Load a secondary font with Cyrillic support (for Russian lyrics only)
+    // The default ImGui font is kept for all other UI elements.
+    {
+        io.Fonts->AddFontDefault(); // slot 0: default UI font
+        const char* fontPaths[] = {
+            // Linux
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            // Windows
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\tahoma.ttf",
+            // macOS
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        };
+        for (const char* fp : fontPaths) {
+            try {
+                if (std::filesystem::exists(fp)) {
+                    ImFontConfig cfg;
+                    cfg.MergeMode = false;
+                    cfg.GlyphRanges = io.Fonts->GetGlyphRangesCyrillic();
+                    m_cyrillicFont = io.Fonts->AddFontFromFileTTF(fp, 15.0f, &cfg);
+                    if (m_cyrillicFont) break;
+                }
+            } catch (...) {}
+        }
+        io.Fonts->Build();
+    }
     
+    // Initialize SDL audio subsystem (used by MusicPlayer) if available
+#ifdef HAVE_SDL2
+    if (SDL_Init(SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "[app] SDL_Init(SDL_INIT_AUDIO) failed: %s\n", SDL_GetError());
+    }
+#endif
+
     // Load About image (initial attempt)
     loadAboutImage();
-
-    // Video player will be lazy-initialized when a file is opened
-    fprintf(stderr, "[init] Video player support: %s\n", ("HAVE_FFMPEG"));
 
 
 // Note: The JSON data is not embedded in the executable by design; the app will load
@@ -962,10 +1010,14 @@ void App::shutdown() {
         m_iconFileTexture = 0;
     }
     
-    if (m_window) {
-        // Shutdown video player
-        m_videoPlayer.close();
+    // Ensure audio is stopped and resources are freed
+    m_musicPlayer.stop();
+    m_musicPlayer.unload();
+#ifdef HAVE_SDL2
+    SDL_Quit();
+#endif
 
+    if (m_window) {
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -987,12 +1039,12 @@ void App::loadAboutImage(const std::string& imageName) {
     }
 
 #if defined(BUILD_SINGLE_EXE) || defined(BUILD_WINDOWS_SINGLE_EXE)
-    // For single-exe builds, embedded image is used (skip dynamic loading)
-    // Try to load embedded about image first
-    fprintf(stderr, "[loadAboutImage] embedded_about_image_png_len=%zu\n", embedded_about_image_png_len);
-    if (embedded_about_image_png_len > 0) {
+    // For single-exe builds, use the generated embedded resource accessor instead of direct symbols
+    size_t embeddedLen = 0;
+    const unsigned char* embeddedData = embedded_resource_data(imageName.c_str(), &embeddedLen);
+    if (embeddedData && embeddedLen > 0) {
         int width = 0, height = 0, channels = 0;
-        unsigned char* data = stbi_load_from_memory(embedded_about_image_png, (int)embedded_about_image_png_len, &width, &height, &channels, 4);
+        unsigned char* data = stbi_load_from_memory(const_cast<unsigned char*>(embeddedData), (int)embeddedLen, &width, &height, &channels, 4);
         if (data) {
             fprintf(stderr, "[loadAboutImage] loaded embedded image %dx%d\n", width, height);
             glGenTextures(1, &m_aboutImageTexture);
@@ -1223,6 +1275,22 @@ void App::renderUI() {
     if (m_showAbout) {
         // Ensure the image is loaded before opening the popup
         loadAboutImage();
+
+        // Attempt to load the embedded About music (res/inneruniverse.ogg) only if the secret has been unlocked
+        if (m_aboutMusicUnlocked && !m_aboutMusicLoaded) {
+            std::vector<std::string> candidates = {"../res/inneruniverse.ogg", "res/inneruniverse.ogg", "./res/inneruniverse.ogg"};
+            for (const auto &c : candidates) {
+                try {
+                    if (std::filesystem::exists(c)) {
+                        if (m_musicPlayer.load(c)) {
+                            m_aboutMusicLoaded = true;
+                            break;
+                        }
+                    }
+                } catch (...) {}
+            }
+        }
+
         ImGui::OpenPopup("About Watercan");
         m_showAbout = false;
     }
@@ -1531,164 +1599,466 @@ void App::renderUI() {
             
             ImGui::SameLine();
             
-            // Text beside image, left-aligned, with video below the text
+            // Text beside image and music player under the text
             ImGui::BeginGroup();
             ImGui::Text("For use with private servers and their communities.");
-            ImGui::Text("This release of Watercan has been given the symbolic name of 'Clippy'!");
-            ImGui::Text("Under the highly permissive MIT license, see LICENSE for details.");
 
-            // Video preview below the text, still beside the image
-            ImGui::Dummy(ImVec2(0.0f, 6.0f));
-            
-            // Calculate video size to fill remaining space to bottom-right
-            // Get current position and window bounds
-            ImVec2 vidStartPos = ImGui::GetCursorScreenPos();
-            ImVec2 winPos = ImGui::GetWindowPos();
-            ImVec2 winSize = ImGui::GetWindowSize();
-            float padding = ImGui::GetStyle().WindowPadding.x;
-            float buttonRowHeight = 30.0f; // space for Close/License buttons
-            
-            float availWidth = (winPos.x + winSize.x - padding) - vidStartPos.x;
-            float availHeight = (winPos.y + winSize.y - padding - buttonRowHeight) - vidStartPos.y;
-            
-            // Maintain 16:9 aspect ratio, fit within available space
-            float vidAspect = 16.0f / 9.0f;
-            float fitByWidth = availWidth;
-            float fitByHeight = availHeight * vidAspect;
-            float vidWidth = (fitByWidth < fitByHeight) ? fitByWidth : fitByHeight;
-            float vidHeight = vidWidth / vidAspect;
-            
-            // Minimum size
-            if (vidWidth < 200.0f) { vidWidth = 200.0f; vidHeight = vidWidth / vidAspect; }
-            
-            ImVec2 vidSize(vidWidth, vidHeight);
-            
-            ImGui::BeginGroup();
-            ImGui::PushID("about_video");
-
-            // Check for CTRL+ALT+C held for 5 seconds to reveal hidden controls
-            bool ctrlAltCHeld = ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt && ImGui::IsKeyDown(ImGuiKey_C);
-            if (ctrlAltCHeld) {
-                if (m_videoControlsKeyHeldSince == 0.0) {
-                    m_videoControlsKeyHeldSince = ImGui::GetTime();
-                } else if (ImGui::GetTime() - m_videoControlsKeyHeldSince >= 5.0) {
-                    m_videoControlsRevealed = true;
+            // Render the sentence with "Shell" as inline clickable letters
+            ImGui::Text("This release of Watercan has been given the symbolic name of '");
+            const char *shellLetters[5] = {"S","h","e","l","l"};
+            const ImVec4 rainbow[5] = {
+                ImVec4(1.0f, 0.2f, 0.2f, 1.0f),  // red
+                ImVec4(1.0f, 0.5f, 0.0f, 1.0f),  // orange
+                ImVec4(1.0f, 0.85f, 0.0f, 1.0f), // yellow
+                ImVec4(0.2f, 0.8f, 0.2f, 1.0f),  // green
+                ImVec4(0.2f, 0.6f, 1.0f, 1.0f)   // blue
+            };
+            for (int i = 0; i < 5; ++i) {
+                ImGui::SameLine(0, 0);
+                ImGui::PushID(i);
+                ImVec2 sz = ImGui::CalcTextSize(shellLetters[i]);
+                ImGui::InvisibleButton("##sl", sz);
+                ImVec2 pos = ImGui::GetItemRectMin();
+                // Use rainbow color if this letter has been activated, otherwise default text color
+                ImVec4 col = (i < m_shellColoredLetters) ? m_shellLetterColors[i] : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), pos, ImGui::ColorConvertFloat4ToU32(col), shellLetters[i]);
+                if (ImGui::IsItemClicked()) {
+                    if (m_shellColoredLetters < 5) {
+                        m_shellLetterColors[m_shellColoredLetters] = rainbow[m_shellColoredLetters];
+                        m_shellColoredLetters++;
+                    } else {
+                        std::array<ImVec4,5> tmp = m_shellLetterColors;
+                        for (int j = 0; j < 5; ++j) tmp[j] = m_shellLetterColors[(j+1)%5];
+                        m_shellLetterColors = tmp;
+                    }
                 }
-            } else {
-                m_videoControlsKeyHeldSince = 0.0; // reset timer when released
+                ImGui::PopID();
             }
+            ImGui::SameLine(0, 0);
+            ImGui::Text("'!");
 
-            // Play/Stop buttons - only visible after secret key combo
-            bool wantPlay = false;
-            bool wantStop = false;
-            if (m_videoControlsRevealed) {
-                if (ImGui::Button(m_videoPlayer.isPlaying() ? "Pause" : "Play", ImVec2(80, 0))) {
-                    wantPlay = true;
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Stop", ImVec2(80,0))) {
-                    wantStop = true;
-                }
-            }
-            
-            // Handle button actions (even though buttons are hidden, keep logic for keyboard shortcuts etc)
-            if (wantPlay) {
-                if (!m_videoPlayer.isOpen()) {
-                    // Try opening the configured path, but also try a few likely fallbacks so the
-                    // About dialog works regardless of current working directory when launching.
-                    std::vector<std::string> candidates = {
-                        m_aboutVideoPath,
-                        std::string("res/clippy.mp4"),
-                        std::string("./res/clippy.mp4"),
-                        std::string("../res/clippy.mp4")
-                    };
-                    bool opened = false;
-                    for (const auto &cand : candidates) {
-                        FILE* f = fopen(cand.c_str(), "rb");
-                        if (f) { fclose(f);
-                            if (m_videoPlayer.open(cand)) { opened = true; break; }
+            // If fully colored, allow holding CTRL+ALT+S here to unlock the music player
+            if (m_shellColoredLetters >= 5) {
+                bool ctrlDownLocal = m_window && ((glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) || (glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS));
+                bool altDownLocal = m_window && ((glfwGetKey(m_window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS) || (glfwGetKey(m_window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS));
+                bool sDownLocal = m_window && (glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS);
+
+                double secretProgress = 0.0;
+                if (ctrlDownLocal && altDownLocal && sDownLocal) {
+                    if (!m_ctrlAltSHoldActive) {
+                        m_ctrlAltSHoldActive = true;
+                        m_ctrlAltSHoldStart = std::chrono::steady_clock::now();
+                    } else {
+                        auto now = std::chrono::steady_clock::now();
+                        secretProgress = std::chrono::duration<double>(now - m_ctrlAltSHoldStart).count() / 5.0;
+                        if (secretProgress >= 1.0 && !m_aboutMusicUnlocked) {
+                            m_aboutMusicUnlocked = true;
+                            // attempt to load music immediately
+                            std::vector<std::string> candidates = {"../res/inneruniverse.ogg", "res/inneruniverse.ogg", "./res/inneruniverse.ogg"};
+                            for (const auto &c : candidates) {
+                                try {
+                                    if (std::filesystem::exists(c)) {
+                                        if (m_musicPlayer.load(c)) { m_aboutMusicLoaded = true; break; }
+                                    }
+                                } catch (...) {}
+                            }
+                            // Load LRC lyrics file alongside the music
+                            if (!m_lrcLoaded) {
+                                std::vector<std::string> lrcCandidates = {"../res/inneruniverse.lrc", "res/inneruniverse.lrc", "./res/inneruniverse.lrc"};
+                                for (const auto &lp : lrcCandidates) {
+                                    try {
+                                        if (!std::filesystem::exists(lp)) continue;
+                                        std::ifstream lf(lp);
+                                        if (!lf.is_open()) continue;
+                                        m_lrcLines.clear();
+                                        std::string line;
+                                        while (std::getline(lf, line)) {
+                                            // Parse [mm:ss.xx] text
+                                            if (line.size() < 10 || line[0] != '[') continue;
+                                            size_t cb = line.find(']');
+                                            if (cb == std::string::npos || cb < 9) continue;
+                                            std::string ts = line.substr(1, cb - 1);
+                                            std::string txt = (cb + 1 < line.size()) ? line.substr(cb + 1) : "";
+                                            // Trim leading space from text
+                                            if (!txt.empty() && txt[0] == ' ') txt = txt.substr(1);
+                                            // Parse mm:ss.xx
+                                            size_t colon = ts.find(':');
+                                            size_t dot = ts.find('.');
+                                            if (colon == std::string::npos) continue;
+                                            int mins = std::stoi(ts.substr(0, colon));
+                                            int secs = std::stoi(ts.substr(colon + 1, (dot != std::string::npos ? dot : ts.size()) - colon - 1));
+                                            int hundredths = 0;
+                                            if (dot != std::string::npos) hundredths = std::stoi(ts.substr(dot + 1));
+                                            double t = mins * 60.0 + secs + hundredths / 100.0;
+                                            m_lrcLines.push_back({t, txt});
+                                        }
+                                        m_lrcLoaded = true;
+                                        break;
+                                    } catch (...) {}
+                                }
+                            }
                         }
                     }
-                    if (!opened) {
-                        m_aboutVideoNote = "Failed to open video file. Place the file at the above path.";
-                        m_aboutVideoNoteUntil = ImGui::GetTime() + 4.0;
-                    } else {
-                        m_videoPlayer.play();
-                        loadAboutImage("TheBrokenClip.png");
+                } else {
+                    m_ctrlAltSHoldActive = false;
+                }
+            }
+            ImGui::Text("Under the highly permissive MIT license, see LICENSE for details.");
+
+            // Music player UI for About dialog (placed to the right of image, under the text)
+            if (m_musicPlayer.hasAudio()) {
+                ImGui::Separator();
+                // Playback controls
+                if (!m_musicPlayer.isPlaying()) {
+                    if (ImGui::Button("Play")) {
+                        m_musicPlayer.play();
                     }
                 } else {
-                    if (!m_videoPlayer.isPlaying()) {
-                        m_videoPlayer.play();
-                        loadAboutImage("TheBrokenClip.png");
-                    } else {
-                        m_videoPlayer.pause();
+                    if (ImGui::Button("Pause")) {
+                        m_musicPlayer.pause();
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Stop")) {
+                    m_musicPlayer.stop();
+                }
+
+                // Display current lyric line to the right of the buttons
+                if (!m_lrcLines.empty()) {
+                    double pos_now = m_musicPlayer.getPositionSeconds();
+                    // Find the last lyric line whose timestamp <= current position
+                    std::string currentLyric;
+                    for (int li = (int)m_lrcLines.size() - 1; li >= 0; --li) {
+                        if (m_lrcLines[li].time <= pos_now) {
+                            currentLyric = m_lrcLines[li].text;
+                            break;
+                        }
+                    }
+                    if (!currentLyric.empty()) {
+                        // Reserve space for a small vector music-note icon to the left of the lyric (font-independent)
+                        float iconH = ImGui::GetTextLineHeight();
+                        float iconW = iconH * 0.7f;
+                        ImGui::SameLine();
+                        ImGui::Dummy(ImVec2(iconW, iconH));
+                        ImVec2 iconPos = ImGui::GetItemRectMin();
+                        ImDrawList* idl = ImGui::GetWindowDrawList();
+                        ImU32 icoCol = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_Text));
+                        // head
+                        ImVec2 headCenter = ImVec2(iconPos.x + iconW * 0.28f, iconPos.y + iconH * 0.58f);
+                        idl->AddCircleFilled(headCenter, iconH * 0.18f, icoCol);
+                        // stem
+                        idl->AddRectFilled(ImVec2(iconPos.x + iconW * 0.48f, iconPos.y + iconH * 0.08f), ImVec2(iconPos.x + iconW * 0.52f, iconPos.y + iconH * 0.58f), icoCol);
+                        // flag (triangle)
+                        idl->AddTriangleFilled(ImVec2(iconPos.x + iconW * 0.52f, iconPos.y + iconH * 0.08f), ImVec2(iconPos.x + iconW * 0.86f, iconPos.y + iconH * 0.18f), ImVec2(iconPos.x + iconW * 0.52f, iconPos.y + iconH * 0.28f), icoCol);
+                        ImGui::SameLine(0, 6.0f);
+                        if (m_cyrillicFont) ImGui::PushFont(m_cyrillicFont);
+                        ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1.0f), "%s", currentLyric.c_str());
+                        if (m_cyrillicFont) ImGui::PopFont();
+                    }
+                }
+
+                // Timeline
+                double dur = m_musicPlayer.getDurationSeconds();
+                double pos = m_musicPlayer.getPositionSeconds();
+                float frac = (dur > 0.0) ? (float)(pos / dur) : 0.0f;
+
+                ImGui::Spacing();
+                float availW = ImGui::GetContentRegionAvail().x;
+                ImGui::PushID("about_timeline");
+                ImGui::InvisibleButton("##timeline", ImVec2(availW, 14));
+                ImVec2 tlMin = ImGui::GetItemRectMin();
+                ImVec2 tlMax = ImGui::GetItemRectMax();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(tlMin, tlMax, ImColor(0.12f, 0.12f, 0.12f, 1.0f));
+                dl->AddRectFilled(ImVec2(tlMin.x, tlMin.y), ImVec2(tlMin.x + frac * (tlMax.x - tlMin.x), tlMax.y), ImColor(0.2f, 0.5f, 0.8f, 1.0f));
+                float cursorX = tlMin.x + frac * (tlMax.x - tlMin.x);
+                dl->AddLine(ImVec2(cursorX, tlMin.y - 2), ImVec2(cursorX, tlMax.y + 2), ImColor(1.0f, 1.0f, 1.0f), 2.0f);
+
+                // Click or drag to seek
+                if (ImGui::IsItemActive() || ImGui::IsItemClicked()) {
+                    if (ImGui::IsMouseDown(0)) {
+                        float mx = ImGui::GetIO().MousePos.x;
+                        float f = (mx - tlMin.x) / (tlMax.x - tlMin.x);
+                        if (f < 0.0f) f = 0.0f;
+                        if (f > 1.0f) f = 1.0f;
+                        m_musicPlayer.seekSeconds(f * dur);
+                    }
+                }
+                ImGui::PopID();
+
+                // Time display (right aligned)
+                std::string timeStr = secsToStr(pos) + " / " + secsToStr(dur);
+                // If the song finished, stop and reset to the beginning
+                if (m_musicPlayer.isPlaying() && dur > 0.0 && pos + 0.05 >= dur) {
+                    m_musicPlayer.stop();
+                    m_musicPlayer.seekSeconds(0.0);
+                }
+                float tw = ImGui::CalcTextSize(timeStr.c_str()).x;
+                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - tw);
+                ImGui::TextUnformatted(timeStr.c_str());
+
+                // Oscilloscope (smoothed and decimated for a higher effective FPS)
+                ImGui::Spacing();
+                ImGui::Text("Inner Universe - Origa - Ghost in the Shell: Standalone Complex OST");
+                float scopeH = 80.0f;
+                // Non-interactive scope area (display-only)
+                ImGui::Dummy(ImVec2(availW, scopeH));
+                ImVec2 scMin = ImGui::GetItemRectMin();
+                ImVec2 scMax = ImGui::GetItemRectMax();
+                dl->AddRectFilled(scMin, scMax, ImColor(0.02f, 0.02f, 0.02f, 1.0f));
+                const auto& samps = m_musicPlayer.samples();
+                if (!samps.empty()) {
+                    size_t sr = (size_t)m_musicPlayer.sampleRate();
+                    size_t n = samps.size();
+                    size_t center = (size_t)std::lround(pos * sr);
+                    if (center >= n) center = n ? (n - 1) : 0;
+                    size_t window = std::min<size_t>((size_t)m_scopeWindowSamples, n);
+                    size_t start = 0;
+                    if (center >= window/2) {
+                        start = center - window/2;
+                        if (start + window > n) start = (n > window) ? (n - window) : 0;
+                    }
+
+                    float w = scMax.x - scMin.x;
+                    float h = scMax.y - scMin.y;
+                    float midY = scMin.y + h * 0.5f;
+
+                    // Determine number of visual points (limit to available pixel width and a reasonable cap)
+                    int pixelCount = (int)std::clamp((int)std::round(w), 32, 1024);
+                    if (pixelCount > (int)window) pixelCount = (int)window;
+
+                    // Resize previous buffer if needed
+                    if ((int)m_scopePrev.size() != pixelCount) m_scopePrev.assign(pixelCount, 0.0f);
+
+                    // Prepare polyline points
+                    std::vector<ImVec2> pts;
+                    pts.reserve(pixelCount);
+
+                    // For each pixel, average samples in its source range and blend with previous frame
+                    for (int px = 0; px < pixelCount; ++px) {
+                        size_t src0 = start + (size_t)((uint64_t)px * window / pixelCount);
+                        size_t src1 = start + (size_t)((uint64_t)(px + 1) * window / pixelCount);
+                        if (src0 >= n) src0 = n ? (n - 1) : 0;
+                        if (src1 > n) src1 = n;
+                        // compute average (avoid extremely small loops)
+                        float sum = 0.0f;
+                        size_t count = 0;
+                        for (size_t si = src0; si < src1; ++si) { sum += samps[si]; ++count; }
+                        float avg = (count > 0) ? (sum / (float)count) : samps[src0];
+
+                        // apply gain and clamp to avoid extreme scaling
+                        avg *= m_scopeGain;
+                        if (avg > 1.0f) avg = 1.0f;
+                        if (avg < -1.0f) avg = -1.0f;
+
+                        // apply temporal smoothing (exponential blend)
+                        float sm = (m_scopePrev[px] * m_scopeSmoothAlpha) + (avg * (1.0f - m_scopeSmoothAlpha));
+                        m_scopePrev[px] = sm;
+
+                        float x = scMin.x + (float)px / (float)std::max(1, pixelCount - 1) * w;
+                        // slightly amplify vertical scaling for more visual impact
+                        float y = midY - sm * (h * 0.5f);
+                        pts.emplace_back(x, y);
+                    }
+
+                    // Draw waveform with a faint glow and a brighter core for better visibility
+                    if (!pts.empty()) {
+                        // glow layer (soft, low alpha, thick)
+                        dl->AddPolyline(pts.data(), (int)pts.size(), ImColor(0.3f, 0.8f, 0.3f, 0.12f), false, 6.0f);
+                        // main waveform (brighter and slightly thicker)
+                        dl->AddPolyline(pts.data(), (int)pts.size(), ImColor(0.46f, 0.98f, 0.46f, 1.0f), false, 2.5f);
                     }
                 }
             }
-            if (wantStop) {
-                m_videoPlayer.pause();
-                m_videoPlayer.close();
-                loadAboutImage("TheBrokenMind.png");
+
+            // Scrolling credits box (under the music player, right of the image)
+            if (m_musicPlayer.hasAudio()) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                float creditsBoxH = 100.0f;
+                float creditsW = ImGui::GetContentRegionAvail().x;
+                ImGui::BeginChild("##credits_scroll", ImVec2(creditsW, creditsBoxH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+                const char* creditsLines[] = {
+                    "",
+                    "--- Credits ---",
+                    "",
+                    "- Duskar//Night -",
+                    "Vibecoded Watercan",
+                    "",
+                    "Github Copilot (Raptor mini and Claude Opus models)",
+                    "Give wheelchair assistance to people who can't code",
+                    "to save their lives.",
+                    "",
+                    "--- Special Thanks ---",
+                    "",
+                    "-- Canvascord and legacies --",
+                    "The order of appearance is not important.",
+                    "",
+                    "- TheSR -",
+                    "For an extreme amount of patience, teachings and belief.",
+                    "",
+                    "- Manuel -",
+                    "A small act of kindness set off a chain reaction",
+                    "that changed history.",
+                    "",
+                    "- MrGatto -",
+                    "For the mods and support during the historical Battle for LA.",
+                    "",
+                    "- Lukas -",
+                    "Paved the way for what is to come.",
+                    "",
+                    "- Shinova -",
+                    "The cute maid who drew the manga edition of The Broken Mind.",
+                    "",
+                    "- Zasha -",
+                    "Original artist of The Broken Mind.",
+                    "",
+                    "ThatModdingCommunity - For having made history!",
+                    "The first public-facing private server for Sky on the internet!",
+                    "Much works still needs to be done.",
+                    "But the end goal is visible on the horizon!",
+                    "",
+                    "",
+                    "",
+                    "Watercan is licensed under the permissive MIT License.",
+                    "See LICENSE file in the distribution for details.",
+                    "",
+                    "",
+                    "Thank you for using Watercan!",
+                };
+                int lineCount = sizeof(creditsLines) / sizeof(creditsLines[0]);
+                float lineH = ImGui::GetTextLineHeightWithSpacing();
+                // Reset point: when the last line has fully scrolled above the box
+                float resetPoint = creditsBoxH + lineCount * lineH;
+
+                m_creditsScrollY += ImGui::GetIO().DeltaTime * 25.0f;
+                if (m_creditsScrollY >= resetPoint) m_creditsScrollY = 0.0f;
+
+                float startY = creditsBoxH - m_creditsScrollY;
+                ImVec2 boxMin = ImGui::GetCursorScreenPos();
+                ImDrawList* cdl = ImGui::GetWindowDrawList();
+                ImVec2 clipMin = boxMin;
+                ImVec2 clipMax = ImVec2(boxMin.x + creditsW, boxMin.y + creditsBoxH);
+                cdl->PushClipRect(clipMin, clipMax, true);
+                for (int li = 0; li < lineCount; ++li) {
+                    float y = boxMin.y + startY + li * lineH;
+                    if (y + lineH < clipMin.y || y > clipMax.y) continue;
+                    float textW = ImGui::CalcTextSize(creditsLines[li]).x;
+                    float x = boxMin.x + (clipMax.x - clipMin.x - textW) * 0.5f;
+                    ImVec4 col(0.8f, 0.85f, 0.95f, 1.0f);
+                    if (std::string(creditsLines[li]).find("---") != std::string::npos)
+                        col = ImVec4(1.0f, 0.85f, 0.4f, 1.0f);
+                    cdl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(x, y), ImGui::ColorConvertFloat4ToU32(col), creditsLines[li]);
+                }
+                cdl->PopClipRect();
+
+                ImGui::EndChild();
             }
 
-            // Render video frame into texture and show it
-            unsigned int tex = m_videoPlayer.getTextureId();
-            if (tex) {
-                ImGui::Image((ImTextureID)(intptr_t)tex, vidSize);
-            } else {
-                ImVec2 vp = ImGui::GetCursorScreenPos();
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                dl->AddRectFilled(vp, ImVec2(vp.x + vidSize.x, vp.y + vidSize.y), IM_COL32(20,20,20,255), 4.0f);
-                ImGui::Dummy(vidSize);
-            }
-
-            if (!m_aboutVideoNote.empty() && ImGui::GetTime() < m_aboutVideoNoteUntil) {
-                ImGui::TextColored(ImVec4(1,0.6f,0.3f,1.0f), "%s", m_aboutVideoNote.c_str());
-            }
-
-            ImGui::PopID();
-            ImGui::EndGroup(); // end video group
-
-            ImGui::EndGroup(); // end text+video column beside image
-
-            // Update video player (upload frames to texture if available)
-            m_videoPlayer.update();
+            ImGui::EndGroup();
         } else {
             // If the image failed to load, show helpful message and path hints
             ImGui::TextColored(ImVec4(1.0f,0.6f,0.3f,1.0f), "About image not found.");
             ImGui::Text("Expected one of: ../res/TheBrokenClip.png, res/TheBrokenClip.png, ./res/TheBrokenClip.png");
+
+            // Fallback: show the music player below when image is not present
+            if (m_musicPlayer.hasAudio()) {
+                ImGui::Separator();
+                if (!m_musicPlayer.isPlaying()) {
+                    if (ImGui::Button("Play")) m_musicPlayer.play();
+                } else {
+                    if (ImGui::Button("Pause")) m_musicPlayer.pause();
+                }
+                ImGui::SameLine(); if (ImGui::Button("Stop")) m_musicPlayer.stop();
+
+                double dur = m_musicPlayer.getDurationSeconds();
+                double pos = m_musicPlayer.getPositionSeconds();
+                float frac = (dur > 0.0) ? (float)(pos / dur) : 0.0f;
+                ImGui::Spacing();
+                float availW = ImGui::GetContentRegionAvail().x;
+                ImGui::PushID("about_timeline_fallback");
+                ImGui::InvisibleButton("##timeline_fallback", ImVec2(availW, 14));
+                ImVec2 tlMin = ImGui::GetItemRectMin();
+                ImVec2 tlMax = ImGui::GetItemRectMax();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(tlMin, tlMax, ImColor(0.12f, 0.12f, 0.12f, 1.0f));
+                dl->AddRectFilled(ImVec2(tlMin.x, tlMin.y), ImVec2(tlMin.x + frac * (tlMax.x - tlMin.x), tlMax.y), ImColor(0.2f, 0.5f, 0.8f, 1.0f));
+                float cursorX = tlMin.x + frac * (tlMax.x - tlMin.x);
+                dl->AddLine(ImVec2(cursorX, tlMin.y - 2), ImVec2(cursorX, tlMax.y + 2), ImColor(1.0f, 1.0f, 1.0f), 2.0f);
+                if (ImGui::IsItemActive() || ImGui::IsItemClicked()) {
+                    if (ImGui::IsMouseDown(0)) {
+                        float mx = ImGui::GetIO().MousePos.x;
+                        float f = (mx - tlMin.x) / (tlMax.x - tlMin.x);
+                        if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+                        m_musicPlayer.seekSeconds(f * dur);
+                    }
+                }
+                ImGui::PopID();
+
+                std::string timeStr = secsToStr(pos) + " / " + secsToStr(dur);
+                // If the song finished, stop and reset to the beginning
+                if (m_musicPlayer.isPlaying() && dur > 0.0 && pos + 0.05 >= dur) {
+                    m_musicPlayer.stop();
+                    m_musicPlayer.seekSeconds(0.0);
+                }
+                float tw = ImGui::CalcTextSize(timeStr.c_str()).x;
+                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - tw);
+                ImGui::TextUnformatted(timeStr.c_str());
+
+                // Simple oscilloscope fallback (smaller, single line)
+                ImGui::Spacing();
+                ImGui::Text("Inner Universe - Origa - Ghost in the Shell: Standalone Complex OST");
+                // Non-interactive fallback scope area (display-only)
+                ImGui::Dummy(ImVec2(availW, 60));
+                ImVec2 scMin = ImGui::GetItemRectMin(); ImVec2 scMax = ImGui::GetItemRectMax();
+                dl->AddRectFilled(scMin, scMax, ImColor(0.02f, 0.02f, 0.02f, 1.0f));
+                const auto& samps = m_musicPlayer.samples();
+                if (!samps.empty()) {
+                    size_t sr = (size_t)m_musicPlayer.sampleRate(); size_t n = samps.size();
+                    size_t center = (size_t)std::lround(pos * sr); if (center >= n) center = n ? (n-1) : 0;
+                    size_t window = std::min<size_t>((size_t)m_scopeWindowSamples, n);
+                    size_t start = (center >= window/2) ? (center - window/2) : 0;
+                    if (start + window > n) start = (n > window) ? (n - window) : 0;
+                    float w = scMax.x - scMin.x; float h = scMax.y - scMin.y; float midY = scMin.y + h*0.5f;
+                    int pixelCount = (int)std::clamp((int)std::round(w), 16, 512); if (pixelCount > (int)window) pixelCount = (int)window;
+                    std::vector<ImVec2> pts; pts.reserve(pixelCount);
+                    for (int px=0; px<pixelCount; ++px) {
+                        size_t s0 = start + (size_t)((uint64_t)px*window/pixelCount);
+                        size_t s1 = start + (size_t)((uint64_t)(px+1)*window/pixelCount);
+                        if (s0>=n) s0 = n? (n-1):0; if (s1>n) s1 = n;
+                        float sum = 0; size_t cnt=0; for (size_t si=s0; si<s1; ++si){sum+=samps[si];++cnt;}
+                        float avg = cnt? (sum/(float)cnt) : samps[s0]; avg *= m_scopeGain; if (avg>1) avg=1;if(avg<-1)avg=-1;
+                        float x = scMin.x + (float)px/(float)std::max(1,pixelCount-1)*w;
+                        float y = midY - avg*(h*0.45f);
+                        pts.emplace_back(x,y);
+                    }
+                    if (!pts.empty()) dl->AddPolyline(pts.data(), (int)pts.size(), ImColor(0.3f,0.8f,0.3f), false, 1.5f);
+                }
+            }
         }
         
+
         if (ImGui::Button("Close", ImVec2(120, 0))) {
-            m_videoControlsRevealed = false;
-            m_videoControlsKeyHeldSince = 0.0;
-            // Stop and close video so it's ready to play again
-            m_videoPlayer.pause();
-            m_videoPlayer.close();
-            loadAboutImage("TheBrokenMind.png");
+            m_musicPlayer.stop();
+            m_musicPlayer.unload();
+            m_aboutMusicLoaded = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("License", ImVec2(120, 0))) {
+            m_musicPlayer.stop();
+            m_musicPlayer.unload();
+            m_aboutMusicLoaded = false;
             m_showLicense = true;
-            // Stop and close video so it's ready to play again
-            m_videoPlayer.pause();
-            m_videoPlayer.close();
-            loadAboutImage("TheBrokenMind.png");
-            m_videoControlsRevealed = false;
-            m_videoControlsKeyHeldSince = 0.0;
-            ImGui::CloseCurrentPopup();  // Close About so License window is visible
+            ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     } else {
-        // Popup was closed (Escape key or clicked outside) - ensure video is stopped
-        if (m_videoPlayer.isOpen()) {
-            m_videoPlayer.pause();
-            m_videoPlayer.close();
-            loadAboutImage("TheBrokenMind.png");
-            m_videoControlsRevealed = false;
-            m_videoControlsKeyHeldSince = 0.0;
-        }
+        // Popup was closed (Escape key or clicked outside)
+        m_musicPlayer.stop();
+        m_musicPlayer.unload();
+        m_aboutMusicLoaded = false;
     }
     
     // License window
@@ -2018,7 +2388,8 @@ void App::renderTreeViewport() {
         // Top-of-viewer transient message (e.g., link failures) — place it on the same baseline as the spirit stats
         if (!m_treeMessage.empty() && std::chrono::steady_clock::now() < m_treeMessageUntil) {
             char msgBuf[512];
-            snprintf(msgBuf, sizeof(msgBuf), "ERROR: %s", m_treeMessage.c_str());
+            const char* prefix = (m_treeMessageType == TreeMessageType::Warning) ? "WARNING: " : "ERROR: ";
+            snprintf(msgBuf, sizeof(msgBuf), "%s%s", prefix, m_treeMessage.c_str());
             float msgW = ImGui::CalcTextSize(msgBuf).x;
             float desiredX = controlsStartX - msgW - 8.0f; // leave small padding from controls
 
@@ -2031,10 +2402,15 @@ void App::renderTreeViewport() {
             }
             // Make sure the message is aligned to the same baseline as the spirit label
             ImGui::SetCursorPosY(startY);
-            ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "%s", msgBuf);
+            if (m_treeMessageType == TreeMessageType::Warning) {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "%s", msgBuf);
+            } else {
+                ImGui::TextColored(ImVec4(0.85f, 0.2f, 0.2f, 1.0f), "%s", msgBuf);
+            }
         } else {
             // Clear expired message
             m_treeMessage.clear();
+            m_treeMessageType = TreeMessageType::None;
         }
     }
 
@@ -2107,6 +2483,9 @@ void App::renderTreeViewport() {
 
                 // Rebuild relationships only (no layout recomputation)
                 m_treeManager.rebuildTree(m_selectedSpirit);
+
+                // Deletion may have reduced the child count of the old parent; update offending status
+                updateOffendingStatusForParent(oldParent);
 
                 m_deleteConfirmMode = false;
                 m_deleteNodeId = 0;
@@ -2210,10 +2589,13 @@ void App::renderTreeViewport() {
             bool canReshape = false;
             bool hasSnaps = false;
             bool needsRestore = false;
+            bool hasOffending = false;
             if (!m_selectedSpirit.empty()) {
                 canReshape = m_treeManager.needsReshape(m_selectedSpirit);
                 hasSnaps = m_treeManager.hasSnaps(m_selectedSpirit);
-                needsRestore = hasSnaps || m_treeManager.needsRestore(m_selectedSpirit);
+                // If any parent has 4+ children, present Restore instead of Reshape
+                hasOffending = !m_offendingParents.empty();
+                needsRestore = hasSnaps || m_treeManager.needsRestore(m_selectedSpirit) || hasOffending;
                 canReshape = canReshape || needsRestore;
             }
             ImGui::BeginDisabled(!canReshape);
@@ -2222,6 +2604,8 @@ void App::renderTreeViewport() {
             if (needsRestore) {
                 if (!m_restoreConfirmPending) {
                     if (ImGui::Button("* Restore", ImVec2(reshapeBtnW, 0))) {
+                        // Hide any current tree message immediately when entering Restore confirmation
+                        clearTreeMessage();
                         m_restoreConfirmPending = true;
                     }
                 } else {
@@ -2290,6 +2674,13 @@ void App::renderTreeViewport() {
                                 m_treeRenderer.clearFreeFloating(kv.first);
                             }
                             m_treeRenderer.suppressCollisions(2.0f);
+
+                            // Clear any offending markers since reload restores original structure
+                            for (auto &kv : m_parentOffendingChild) m_treeRenderer.clearOffendingNode(kv.second);
+                            m_parentOffendingChild.clear();
+                            m_offendingParents.clear();
+                            // Clear any top-of-viewer message when user confirmed Restore
+                            clearTreeMessage();
                         }
 
                         // Clear confirmation state
@@ -2297,6 +2688,8 @@ void App::renderTreeViewport() {
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("No", ImVec2(smallW, 0))) {
+                        // User declined: re-show the persistent warning message
+                        setTreeMessage("Tree structure will look off ingame", TreeMessageType::Warning, std::chrono::seconds(0));
                         m_restoreConfirmPending = false;
                     }
                 }
@@ -2423,6 +2816,8 @@ void App::renderTreeViewport() {
                             m_treeRenderer.thawNode(kv.first);
                         }
                     }
+                    // After detaching, update offending status for the old parent
+                    updateOffendingStatusForParent(s.parentId);
                 } else {
                     // Fallback to full reshape if the parent was root
                     if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
@@ -2442,24 +2837,32 @@ void App::renderTreeViewport() {
     if (!m_selectedSpirit.empty()) {
         auto dupIds = m_treeManager.getDuplicateNodeIds(m_selectedSpirit);
         if (!dupIds.empty()) {
-            // Set persistent message
-            m_treeMessage = "Node with same name found.";
-            m_treeMessageUntil = std::chrono::steady_clock::time_point::max();
+            // Set persistent message (error)
+            setTreeMessage("Node with same name found.", TreeMessageType::Error, std::chrono::seconds(0));
             // Mark nodes as red-pulsing
             for (uint64_t id : dupIds) m_treeRenderer.setNodeRedState(id, true);
             // Also ensure any nodes no longer duplicates are cleared
             const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
             if (tptr) {
                 for (const auto& n : tptr->nodes) {
-                    if (dupIds.count(n.id) == 0) m_treeRenderer.setNodeRedState(n.id, false);
+                    if (dupIds.count(n.id) == 0) {
+                    // Do not clear the red pulse if this node is currently flagged as offending
+                    bool isOffendingChild = false;
+                    for (const auto &kv : m_parentOffendingChild) { if (kv.second == n.id) { isOffendingChild = true; break; } }
+                    if (!isOffendingChild) m_treeRenderer.setNodeRedState(n.id, false);
+                }
                 }
             }
         } else {
             // No duplicates: clear message if it matches our duplicate message and clear pulses
-            if (m_treeMessage == "Node with same name found.") m_treeMessage.clear();
+            if (m_treeMessage == "Node with same name found.") clearTreeMessageIfMatches("Node with same name found.");
             const SpiritTree* tptr = m_treeManager.getTree(m_selectedSpirit);
             if (tptr) {
-                for (const auto& n : tptr->nodes) m_treeRenderer.setNodeRedState(n.id, false);
+                for (const auto& n : tptr->nodes) {
+                    bool isOffendingChild = false;
+                    for (const auto &kv : m_parentOffendingChild) { if (kv.second == n.id) { isOffendingChild = true; break; } }
+                    if (!isOffendingChild) m_treeRenderer.setNodeRedState(n.id, false);
+                }
             }
         }
     }
@@ -2518,8 +2921,7 @@ void App::renderTreeViewport() {
                     m_treeRenderer.clearSelectableNodes();
                 }
             } else {
-                m_treeMessage = "Select a highlighted leaf node to reorder";
-                m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                setTreeMessage("Select a highlighted leaf node to reorder", TreeMessageType::Warning, std::chrono::seconds(3));
             }
         }
     }
@@ -2765,6 +3167,8 @@ void App::renderTreeViewport() {
                             m_treeRenderer.thawNode(kv.first);
                         }
                     }
+                    // After clearing a link, the old parent may no longer be offending
+                    updateOffendingStatusForParent(oldParent);
                 } else {
                     // If oldParent was root (0) fallback to global reshape
                     if (m_treeManager.reshapeTreeAndCollectShifts(m_selectedSpirit, &shifts)) {
@@ -2849,9 +3253,8 @@ void App::renderTreeViewport() {
         if (!ok) {
             // performLinkToTarget already set a helpful message for the user in some cases
             if (m_treeMessage.empty()) {
-                m_treeMessage = "Link failed: invalid source or target";
+                setTreeMessage("Link failed: invalid source or target", TreeMessageType::Error, std::chrono::seconds(3));
             }
-            m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         }
 
         // Exit link mode regardless of success so UI isn't stuck
@@ -2875,8 +3278,7 @@ bool App::performLinkToTarget(uint64_t targetId) {
 
     // Disallow linking a new node to another new node; new nodes must attach to main tree nodes
     if (sourceNode->isNew && targetNode->isNew) {
-        m_treeMessage = "Link to main tree or subtree.";
-        m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        setTreeMessage("Only one tree per spirits! Link to main or sub tree.", TreeMessageType::Error, std::chrono::seconds(4));
         return false;
     }
 
@@ -2918,6 +3320,14 @@ bool App::performLinkToTarget(uint64_t targetId) {
 
     // Also thaw the source node itself so it participates in physics
     m_treeRenderer.thawNode(m_linkSourceNodeId);
+
+    // Check for offending parent (too many children) and warn, but allow the link
+    updateOffendingStatusForParent(targetId, m_linkSourceNodeId);
+    // Ensure a persistent message is set if threshold reached (defensive)
+    SpiritNode* parentCheck = m_treeManager.getNode(m_selectedSpirit, targetId);
+    if (parentCheck && parentCheck->children.size() >= 4) {
+        setTreeMessage("Tree structure will look off ingame", TreeMessageType::Warning, std::chrono::seconds(0));
+    }
 
     m_treeRenderer.suppressCollisions(2.0f);
     return true;
@@ -2988,6 +3398,73 @@ void App::repositionChildrenOfNode(uint64_t parentId) {
             for (uint64_t gc2 : desc->children) stack.push_back(gc2);
         }
     }
+}
+
+// Update offending parent status (too many children > 4).
+void App::updateOffendingStatusForParent(uint64_t parentId, uint64_t offendingChildId) {
+    if (parentId == 0 || m_selectedSpirit.empty()) return;
+    SpiritNode* parent = m_treeManager.getNode(m_selectedSpirit, parentId);
+    if (!parent) return;
+
+    size_t childCount = parent->children.size();
+    const std::string warn = "Tree structure will look off ingame";
+
+    if (childCount >= 4) {
+        // Determine offending child
+        uint64_t offending = offendingChildId;
+        // Prefer the provided offending child, otherwise reuse previous, otherwise pick the newest (last child)
+        auto pit = m_parentOffendingChild.find(parentId);
+        if (offending == 0 && pit != m_parentOffendingChild.end()) offending = pit->second;
+        if (offending == 0 && !parent->children.empty()) offending = parent->children.back();
+
+        // Mark offending parent and offending child node
+        m_offendingParents.insert(parentId);
+        m_parentOffendingChild[parentId] = offending;
+        m_treeRenderer.setOffendingNode(offending);
+        // Also pulse the node red ring for visibility
+        m_treeRenderer.setNodeRedState(offending, true);
+        m_treeMessage = warn;
+        m_treeMessageUntil = std::chrono::steady_clock::time_point::max();
+    } else {
+        // Clear offending child if present
+        auto pit = m_parentOffendingChild.find(parentId);
+        if (pit != m_parentOffendingChild.end()) {
+            m_treeRenderer.clearOffendingNode(pit->second);
+            // Also clear red pulse state
+            m_treeRenderer.setNodeRedState(pit->second, false);
+            m_parentOffendingChild.erase(pit);
+        }
+        // Clear offending parent set
+        m_offendingParents.erase(parentId);
+        // If no more offending parents, clear message
+        if (m_offendingParents.empty() && m_treeMessage == warn) {
+            m_treeMessage.clear();
+        }
+    }
+}
+
+void App::setTreeMessage(const std::string& msg, App::TreeMessageType type, std::chrono::seconds duration) {
+    m_treeMessage = msg;
+    m_treeMessageType = type;
+    if (duration.count() == 0) {
+        m_treeMessageUntil = std::chrono::steady_clock::time_point::max();
+    } else {
+        m_treeMessageUntil = std::chrono::steady_clock::now() + duration;
+    }
+}
+
+void App::clearTreeMessageIfMatches(const std::string& msg) {
+    if (m_treeMessage == msg) {
+        m_treeMessage.clear();
+        m_treeMessageType = TreeMessageType::None;
+        m_treeMessageUntil = std::chrono::steady_clock::now();
+    }
+}
+
+void App::clearTreeMessage() {
+    m_treeMessage.clear();
+    m_treeMessageType = TreeMessageType::None;
+    m_treeMessageUntil = std::chrono::steady_clock::now();
 }
 
 // Helper: perform insertion of the currently selected leaf into the reorder node at the given index
@@ -3324,8 +3801,7 @@ void App::renderNodeDetails() {
         if (m_treeManager.isNameDuplicate(m_selectedSpirit, newName, selectedNode->id)) {
             // Revert to initial name and inform the user
             selectedNode->name = selectedNode->originalName;
-            m_treeMessage = "Node with same name found.";
-            m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            setTreeMessage("Node with same name found.", TreeMessageType::Error, std::chrono::seconds(3));
             // Visual pulse on offending node
             m_treeRenderer.pulseNodeRed(selectedNode->id);
         } else {
@@ -3632,8 +4108,7 @@ void App::renderNodeJsonEditor() {
                     SpiritNode* node = m_treeManager.getNode(m_selectedSpirit, selectedNodeId);
                     if (node) {
                         m_textEditor.SetText(SpiritTreeManager::nodeToJson(*node));
-                        m_treeMessage = "Node with same name found.";
-                        m_treeMessageUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                        setTreeMessage("Node with same name found.", TreeMessageType::Error, std::chrono::seconds(3));
                         m_treeRenderer.pulseNodeRed(selectedNodeId);
                     }
                     m_jsonParseError = true;
@@ -3723,6 +4198,8 @@ void App::renderNodeJsonEditor() {
         if (desiredX > ImGui::GetCursorPosX()) {
             ImGui::SetCursorPosX(desiredX);
         }
+
+
 
         ImGui::TextColored(ctrlCol, "%s", s_ctrl); ImGui::SameLine(0,0);
         ImGui::TextColored(plusCol, "%s", s_plus); ImGui::SameLine(0,0);

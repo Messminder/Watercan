@@ -156,6 +156,15 @@ private:
     // Global collision suppression timer (seconds remaining) - when >0 collision checks are skipped
     float m_collisionSuppressRemaining = 0.0f;
 
+    // Nodes that are considered 'offending' (too many children). Rendered with red fill.
+    std::unordered_set<uint64_t> m_offendingNodes;
+
+public:
+    // APIs to manage offending nodes
+    void setOffendingNode(uint64_t nodeId) { m_offendingNodes.insert(nodeId); }
+    void clearOffendingNode(uint64_t nodeId) { m_offendingNodes.erase(nodeId); }
+    bool isOffendingNode(uint64_t nodeId) const { return m_offendingNodes.count(nodeId) > 0; }
+
 
     
     // Spring physics settings
