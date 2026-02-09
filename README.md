@@ -4,9 +4,9 @@ To water and grow **spirit trees!**
 Watercan is a dependency tree viewer and editor specialized for Sky: Children of the Light.
 It is currently intended for private server software developers, but anyone can use it to create their own spirit trees that are compatible with ThatModdingCommunity, NightSky Communal Ark and other private server softwares.
 
-Currently, this software is **almost** on point for release, but you're welcome to download it's earlybird releases for Linux (AppImage) and Windows (Standalone exe). It supports all spirits from The Season of Belonging until The Season of the Two Embers Part I. (Sky: Light awaits -> Sky: COTL 0.32.0)
+Currently, this software is **almost** on point for general public use, but considered good enough for developers who do not feel like manually editing the JSON structures. You're welcome to download it's earlybird releases for Linux (AppImage) and Windows (Standalone exe). It supports all spirits and guides from The Season of Belonging until The Season of the Two Embers Part I. (Sky: Light awaits -> Sky: COTL 0.32.0)
 
-Further knowledge gathering is requiered to support spirits from Season of Migration and onward and will come in a future release.
+Further knowledge gathering is requiered to support spirits from Season of Migration and onward and will come in a future release due to TGC having no consideration for the venerable and meaningful tree design.
 
 ## Nice features:
 * Interactive dependency tree viewer and editor. Allowing the user to add, delete, link and unlink nodes
@@ -107,5 +107,6 @@ This project is provided as-is under the MIT license.
 - JSON parsing via [nlohmann/json](https://github.com/nlohmann/json)
 
 ## Disclaimer
-Watercan can absolutely give you a faulty file that will crash your clients if you misuse it!
+Watercan can absolutely give you a faulty file that will crash your clients if you misuse it! Some measures are in place to prevent this as much as possible, but it is your responsibility to check if your spiritshops are correctly set.
+
 Also Sky isn't a "bragging game", Theobald! >:(
