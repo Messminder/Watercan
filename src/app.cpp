@@ -2555,6 +2555,16 @@ void App::renderTreeViewport() {
                 // Rebuild relationships only (no layout recomputation)
                 m_treeManager.rebuildTree(m_selectedSpirit);
 
+                // Smoothly update positions for any surviving siblings by computing layout changes
+                if (oldParent != 0) {
+                    std::unordered_map<uint64_t, std::pair<float,float>> shifts;
+                    if (m_treeManager.layoutSubtreeAndCollectShifts(m_selectedSpirit, oldParent, &shifts)) {
+                        for (const auto &kv : shifts) {
+                            m_treeRenderer.applyBaseShift(kv.first, kv.second.first, kv.second.second);
+                        }
+                    }
+                }
+
                 // Deletion may have reduced the child count of the old parent; update offending status
                 updateOffendingStatusForParent(oldParent);
 

@@ -237,15 +237,6 @@ if(BUILD_WINDOWS_SINGLE_EXE OR BUILD_SINGLE_EXE)
     # Add generated accessor to sources so it's compiled into the executable
     list(APPEND EXTRA_EMBEDDED_SOURCES ${EMBED_CPP})
 
-    # Generate C++ source implementing the accessor that maps filenames to symbols
-    set(EMBED_CPP "${EMBED_DIR}/embedded/embedded_resources.cpp")
-    file(WRITE ${EMBED_CPP} "#include \"embedded_resources.h\"\n#include <string.h>\n\nconst unsigned char* embedded_resource_data(const char* filename, size_t* out_len) {\n    if (!filename) return nullptr;\n")
-    # Append checks for each file/var mapping
-    foreach(idx RANGE 0 ${EMBED_INPUT_FILES_LENGTH})
-        # NOTE: We'll fill this area in later; placeholder for loop below
-    endforeach()
-    file(APPEND ${EMBED_CPP} "    // Not found\n    if (out_len) *out_len = 0;\n    return nullptr;\n}\n")
-
     # Add embedded sources to target
     if(EXTRA_EMBEDDED_SOURCES)
         target_sources(Watercan PRIVATE ${EXTRA_EMBEDDED_SOURCES})
