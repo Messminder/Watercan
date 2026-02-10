@@ -109,4 +109,6 @@ This project is provided as-is under the MIT license.
 ## Disclaimer
 Watercan can absolutely give you a faulty file that will crash your clients if you misuse it! Some measures are in place to prevent this as much as possible, but it is your responsibility to check if your spiritshops are correctly set.
 
+**This software has been vibecoded one feature at a time — expect quirks; the author apologizes for any rough edges.**
+
 Also Sky isn't a "bragging game", Theobald! >:(
